@@ -9,6 +9,11 @@ Standard library only, Python 3.9 or newer. The plugin's commands and hooks run 
     slancha.py hook     a Claude Code hook; the event arrives as JSON on stdin
     slancha.py flush    uploads the usage spool; the hooks start it in the background
 
+From a terminal, to set up a machine (install.sh runs both):
+
+    slancha.py auth [--api URL] [--no-browser]   sign in; an org admin approves the code
+    slancha.py init [--dry-run]                  configure Claude Code: plugins and tracing
+
 The token is a personal token from the Slancha console, read from SLANCHA_TOKEN or from
 ~/.config/slancha/token. It goes only to the configured API origin, only over HTTPS, and is never
 printed. A redirect is refused rather than followed, because urllib would send the token along.
@@ -23,7 +28,9 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -110,9 +117,13 @@ def cache_dir() -> Path:
     return Path.home() / ".cache" / "slancha"
 
 
-def user_skills_root() -> Path:
+def claude_config_dir() -> Path:
     base = os.environ.get("CLAUDE_CONFIG_DIR")
-    return (Path(base).expanduser() if base else Path.home() / ".claude") / "skills"
+    return Path(base).expanduser() if base else Path.home() / ".claude"
+
+
+def user_skills_root() -> Path:
+    return claude_config_dir() / "skills"
 
 
 def skill_roots(project: str | None) -> list[Path]:
@@ -187,6 +198,11 @@ def api_base() -> str:
         return DEFAULT_API_URL
     if not isinstance(raw, str):
         raise SlanchaError(f"api_url in {where} is not a string.")
+    return check_url(raw, where)
+
+
+def check_url(raw: str, where: str) -> str:
+    """An https:// URL (http:// only for 127.0.0.1 or localhost), without a trailing slash."""
     url = raw.strip()
     parts = urllib.parse.urlsplit(url)
     try:
@@ -937,6 +953,484 @@ def hook(stdin: bytes) -> str | None:
     return None
 
 
+# --- auth: the device authorization grant --------------------------------------------------------
+
+EXPIRED = "The code expired before an admin approved it. Nothing was saved; run slancha auth again."
+
+
+def say(*lines: str) -> None:
+    for line in lines:
+        print(line, flush=True)       # stdout is a pipe under install.sh and in tests
+
+
+def printable(value, limit: int = 300) -> str:
+    return "".join(c if c.isprintable() else " " for c in str(value))[:limit]
+
+
+def post_public(api: str, path: str, body: dict, timeout: float = 20) -> tuple[int, dict]:
+    """(status, JSON object or {}) of an unauthenticated POST. Redirects are refused."""
+    req = urllib.request.Request(api + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Accept": "application/json",
+                                          "User-Agent": f"slancha-claude-plugin/{VERSION}"})
+    host = urllib.parse.urlsplit(api).netloc
+    try:
+        with _OPENER.open(req, timeout=timeout) as response:
+            status, payload = response.status, response.read(65537)
+    except urllib.error.HTTPError as error:
+        with contextlib.closing(error):
+            if 300 <= error.code < 400:
+                raise ApiError(error.code, f"{host} answered with a redirect (HTTP {error.code}); "
+                                           "not following it.") from None
+            status, payload = error.code, error.read(65537)
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+        reason = getattr(error, "reason", None) or error.__class__.__name__
+        raise Offline(f"Cannot reach {host} ({reason}).") from None
+    try:
+        doc = json.loads(payload)
+    except ValueError:
+        doc = None
+    return status, doc if isinstance(doc, dict) else {}
+
+
+def answered(status: int, doc: dict) -> str:
+    detail = doc.get("detail") or doc.get("error")
+    return f"Slancha answered HTTP {status}" + (f": {printable(detail, 200)}"
+                                                if isinstance(detail, str) else ".")
+
+
+def read_config_json() -> dict:
+    try:
+        doc = json.loads((config_dir() / "config.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        doc = None
+    if not isinstance(doc, dict):
+        raise SlanchaError("~/.config/slancha/config.json is not a JSON object; fix or remove it.")
+    return doc
+
+
+def write_private(path: Path, text: str) -> None:
+    """Replace `path` atomically with a file only the user can read (0600)."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def start_device(api: str) -> dict:
+    client = f"slancha CLI on {socket.gethostname().split('.')[0] or 'an unnamed host'}"
+    status, doc = post_public(api, "/api/cli/device", {"client": client})
+    if status != 200:
+        raise ApiError(status, answered(status, doc))
+    uri = doc.get("verification_uri_complete")
+    parts = urllib.parse.urlsplit(uri) if isinstance(uri, str) else None
+    ok = (isinstance(doc.get("device_code"), str) and doc["device_code"]
+          and isinstance(doc.get("user_code"), str) and doc["user_code"]
+          and parts is not None and (parts.scheme == "https" or (
+              parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost")))
+          and isinstance(doc.get("expires_in"), int) and doc["expires_in"] > 0
+          and isinstance(doc.get("interval", 5), int))
+    if not ok:
+        raise SlanchaError("Slancha answered /api/cli/device without a usable device code.")
+    return doc
+
+
+def open_browser(url: str) -> None:
+    # Without a display, Linux's webbrowser falls back to a text browser that takes over the
+    # terminal while the code is waiting; print the link only.
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY")
+                                                 or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
+def wait_for_approval(api: str, device_code: str, expires_in: int, interval: int) -> dict:
+    """Poll /api/cli/token until an admin approves the code (RFC 8628, section 3.5)."""
+    deadline = time.monotonic() + expires_in
+    interval, failures = max(1, interval), 0
+    while time.monotonic() + interval < deadline:
+        time.sleep(interval)
+        try:
+            status, doc = post_public(api, "/api/cli/token", {"device_code": device_code})
+        except Offline:
+            status, doc = 0, {}
+        if status == 0 or status >= 500:           # a blip; the code stays valid until it expires
+            failures += 1
+            if failures >= 5:
+                raise SlanchaError("Slancha stopped answering while waiting for approval. Nothing "
+                                   "was saved; run slancha auth again.")
+            continue
+        failures = 0
+        error = doc.get("error")
+        if status == 200:
+            return doc
+        if status == 400 and error == "authorization_pending":
+            continue
+        if status == 400 and error == "slow_down":
+            interval += 5
+            continue
+        if status == 400 and error == "expired_token":
+            raise SlanchaError(EXPIRED)
+        if status == 400 and error == "access_denied":
+            raise SlanchaError("The request was denied in the Slancha console. Nothing was saved.")
+        raise ApiError(status, answered(status, doc) + " Nothing was saved.")
+    raise SlanchaError(EXPIRED)
+
+
+def auth(api_arg: str | None, browser: bool) -> None:
+    api = check_url(api_arg, "--api") if api_arg else api_base()
+    settings = read_config_json()        # checked now: a broken file must not cost an approval
+    device = start_device(api)
+    uri = printable(device["verification_uri_complete"], 1000)
+    minutes = max(1, device["expires_in"] // 60)
+    say(f"Signing in to Slancha at {api}.", "",
+        f"  Your code:  {printable(device['user_code'], 40)}",
+        f"  Approve at: {uri}", "",
+        "An admin of your Slancha org approves this request on that page (check that it shows the "
+        "same code).", f"Waiting up to {minutes} min for the approval; Ctrl-C stops.")
+    if browser:
+        open_browser(device["verification_uri_complete"])
+    doc = wait_for_approval(api, device["device_code"], device["expires_in"],
+                            device.get("interval", 5))
+    token, tracing = doc.get("token"), doc.get("tracing")
+    if not (isinstance(token, str) and TOKEN.fullmatch(token)):
+        raise SlanchaError("Slancha approved the request but sent no personal token. Nothing was "
+                           "saved.")
+    keys = ("host", "public_key", "secret_key")
+    if tracing is not None:
+        if not (isinstance(tracing, dict) and all(isinstance(tracing.get(k), str)
+                                                  and tracing[k].strip() for k in keys)):
+            raise SlanchaError("Slancha sent unusable tracing keys. Nothing was saved.")
+        tracing = {k: tracing[k].strip() for k in keys}
+        tracing["host"] = check_url(tracing["host"], "The tracing host Slancha sent")
+
+    directory = config_dir()
+    old = os.umask(0o077)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        write_private(directory / "token", token)
+        write_private(directory / "config.json",
+                      json.dumps({**settings, "api_url": api}, indent=2) + "\n")
+        stale = False
+        if tracing is not None:
+            write_private(directory / "tracing.json", json.dumps(tracing, indent=2) + "\n")
+        elif (directory / "tracing.json").exists():
+            (directory / "tracing.json").unlink()    # it belonged to an earlier sign-in
+            stale = True
+    finally:
+        os.umask(old)
+
+    org = doc.get("org_id")
+    lines = ["", "Approved" + (f" for org {printable(org, 80)}." if isinstance(org, str) else "."),
+             "Saved, readable only by you:",
+             "  ~/.config/slancha/token        your personal token",
+             f"  ~/.config/slancha/config.json  api_url {api}"]
+    if tracing is not None:
+        lines += [f"  ~/.config/slancha/tracing.json your org's tracing keys ({tracing['host']})",
+                  "Next: slancha init"]
+    else:
+        lines += [("Removed ~/.config/slancha/tracing.json from an earlier sign-in. " if stale
+                   else "") + "Your org sent no tracing keys, and slancha init needs them: ask an "
+                  "org admin to set up tracing in the console, then run slancha auth again."]
+    if os.environ.get("SLANCHA_TOKEN"):
+        lines.append("Note: SLANCHA_TOKEN is set in this shell and takes precedence over the "
+                     "saved token; unset it to use the new one.")
+    say(*lines)
+
+
+# --- init: configure Claude Code on this machine -------------------------------------------------
+
+LANGFUSE_REPO = "https://github.com/langfuse/claude-observability-plugin"
+LANGFUSE_COMMIT = "b5211009698fdfe79c6bbe90d6901ad255ea65d3"
+LANGFUSE_MARKETPLACE = "langfuse-observability"
+LANGFUSE_PLUGIN = f"langfuse-observability@{LANGFUSE_MARKETPLACE}"
+# Non-secret options only: skill tags on, image upload off. No trace seed.
+LANGFUSE_OPTIONS = {"CC_LANGFUSE_SKILL_TAGS": True, "CC_LANGFUSE_CAPTURE_IMAGES": False}
+# The Langfuse SDK's own names. The hook reads them before the CC_ names, and every process Claude
+# Code starts inherits settings `env`, so they would reroute other programs' traces.
+SDK_ENV = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "LANGFUSE_BASE_URL")
+SLANCHA_REPO = "SlanchaAI/slancha-claude-plugin"
+SLANCHA_MARKETPLACE = "slancha"        # the name in .claude-plugin/marketplace.json; a test checks
+SLANCHA_PLUGIN = f"slancha@{SLANCHA_MARKETPLACE}"
+
+
+def langfuse_dir() -> Path:
+    return Path.home() / ".local" / "share" / "slancha" / "langfuse-observability"
+
+
+def run(cmd: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SlanchaError(f"`{shlex.join(cmd)}` did not run: {exc}") from None
+
+
+def must(cmd: list[str]) -> str:
+    result = run(cmd)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+        raise SlanchaError(f"`{shlex.join(cmd)}` failed (exit {result.returncode})"
+                           + (": " + " / ".join(printable(t) for t in tail) if tail else "."))
+    return result.stdout
+
+
+def prerequisites() -> list[str]:
+    missing = []
+    for tool, what in (("claude", "Claude Code"), ("git", "git"),
+                       ("uv", "uv (https://docs.astral.sh/uv/), which runs the Langfuse hook")):
+        if shutil.which(tool) is None:
+            missing.append(f"`{tool}` is not on PATH: install {what}.")
+    if shutil.which("uv") and run(["uv", "python", "find", ">=3.10"]).returncode != 0:
+        missing.append("uv finds no Python 3.10 or newer, which the Langfuse hook needs: run "
+                       "`uv python install 3.12`.")
+    return missing
+
+
+def load_tracing() -> dict:
+    doc = read_json(config_dir() / "tracing.json")
+    if not (isinstance(doc, dict) and all(isinstance(doc.get(k), str) and doc[k]
+                                          for k in ("host", "public_key", "secret_key"))):
+        raise SlanchaError("No tracing keys in ~/.config/slancha/tracing.json: run slancha auth "
+                           "first.")
+    doc["host"] = check_url(doc["host"], "host in ~/.config/slancha/tracing.json")
+    return doc
+
+
+def json_list(cmd: list[str]) -> list[dict]:
+    try:
+        rows = json.loads(must(cmd))
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        raise SlanchaError(f"`{shlex.join(cmd)}` did not print a JSON list.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+class Actions:
+    """Runs each change, or with --dry-run only says what it would run."""
+
+    def __init__(self, dry_run: bool):
+        self.dry_run = dry_run
+
+    def run(self, cmd: list[str]) -> None:
+        home = str(Path.home()) + os.sep
+        shown_cmd = " ".join("~/" + shlex.quote(c[len(home):]) if c.startswith(home)
+                             else shlex.quote(c) for c in cmd)
+        say(f"  {'would run' if self.dry_run else 'running'}: {shown_cmd}")
+        if not self.dry_run:
+            must(cmd)
+
+
+def git_head(repo: Path) -> str:
+    result = run(["git", "-C", str(repo), "rev-parse", "HEAD"])
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def setup_langfuse(act: Actions, installed: set[str], markets: dict[str, dict]) -> None:
+    repo = langfuse_dir()
+    say(f"Langfuse's Claude Code plugin, pinned to {LANGFUSE_COMMIT[:8]}:")
+    if repo.exists() and not (repo / ".git").exists():
+        raise SlanchaError(f"{shown(repo)} exists but is not a git clone; move it away and run "
+                           "slancha init again.")
+    if not repo.exists():
+        if not act.dry_run:
+            repo.parent.mkdir(parents=True, exist_ok=True)
+        act.run(["git", "clone", "--quiet", LANGFUSE_REPO, str(repo)])
+    if act.dry_run and not repo.exists():
+        act.run(["git", "-C", str(repo), "checkout", "--quiet", "--detach", LANGFUSE_COMMIT])
+    elif git_head(repo) != LANGFUSE_COMMIT:
+        if run(["git", "-C", str(repo), "cat-file", "-e",
+                LANGFUSE_COMMIT + "^{commit}"]).returncode != 0:
+            act.run(["git", "-C", str(repo), "fetch", "--quiet", "origin"])
+        act.run(["git", "-C", str(repo), "checkout", "--quiet", "--detach", LANGFUSE_COMMIT])
+        if not act.dry_run and git_head(repo) != LANGFUSE_COMMIT:
+            raise SlanchaError(f"{shown(repo)} is not at {LANGFUSE_COMMIT} after the checkout; "
+                               "move it away and run slancha init again.")
+    else:
+        say(f"  {shown(repo)} is at {LANGFUSE_COMMIT[:8]}")
+
+    market = markets.get(LANGFUSE_MARKETPLACE)
+    if market is None:
+        act.run(["claude", "plugin", "marketplace", "add", str(repo)])
+    else:
+        source = market.get("path") or market.get("installLocation") or market.get("repo") or "?"
+        if not (isinstance(source, str)
+                and os.path.realpath(source) == os.path.realpath(repo)):
+            raise SlanchaError(
+                f"Claude Code already has a marketplace named {LANGFUSE_MARKETPLACE} from "
+                f"{printable(source)}, not the pinned clone. Remove it with `claude plugin "
+                f"marketplace remove {LANGFUSE_MARKETPLACE}` (this also uninstalls its plugin), "
+                "then run slancha init again.")
+        say(f"  marketplace {LANGFUSE_MARKETPLACE} is the pinned clone")
+    if LANGFUSE_PLUGIN in installed:
+        say(f"  {LANGFUSE_PLUGIN} is installed")
+    else:
+        act.run(["claude", "plugin", "install", LANGFUSE_PLUGIN, "--scope", "user"])
+
+
+def setup_slancha(act: Actions, installed: set[str], markets: dict[str, dict]) -> None:
+    say("The Slancha plugin:")
+    if SLANCHA_MARKETPLACE in markets:
+        say(f"  marketplace {SLANCHA_MARKETPLACE} is configured")
+    else:
+        act.run(["claude", "plugin", "marketplace", "add", SLANCHA_REPO])
+    if SLANCHA_PLUGIN in installed:
+        say(f"  {SLANCHA_PLUGIN} is installed")
+    else:
+        act.run(["claude", "plugin", "install", SLANCHA_PLUGIN, "--scope", "user"])
+
+
+def mentions_langfuse(node) -> bool:
+    if isinstance(node, str):
+        return "langfuse" in node.lower()
+    if isinstance(node, dict):
+        return any(mentions_langfuse(v) for v in node.values())
+    if isinstance(node, list):
+        return any(mentions_langfuse(v) for v in node)
+    return False
+
+
+def merge_settings(settings: dict, tracing: dict) -> list[str]:
+    """Merge the tracing configuration into Claude Code's settings in place; what changed."""
+    notes = []
+    env = settings.setdefault("env", {})
+    configs = settings.setdefault("pluginConfigs", {})
+    entry = configs.setdefault(LANGFUSE_PLUGIN, {}) if isinstance(configs, dict) else None
+    options = entry.setdefault("options", {}) if isinstance(entry, dict) else None
+    if not isinstance(env, dict) or not isinstance(options, dict):
+        raise SlanchaError("settings.json has an `env` or `pluginConfigs` that is not an object; "
+                           "fix it, then run slancha init again.")
+    wanted = {"CC_LANGFUSE_PUBLIC_KEY": tracing["public_key"],
+              "CC_LANGFUSE_SECRET_KEY": tracing["secret_key"],
+              "CC_LANGFUSE_BASE_URL": tracing["host"]}
+    changed = [k for k, v in wanted.items() if env.get(k) != v]
+    env.update(wanted)
+    if changed:
+        notes.append(f"set env {', '.join(changed)} (Langfuse host {tracing['host']})")
+    removed = [k for k in SDK_ENV if k in env]
+    for key in removed:
+        del env[key]
+    if removed:
+        notes.append(f"remove env {', '.join(removed)}: the Langfuse SDK's own names would "
+                     "reroute the traces of every program Claude Code starts; the plugin reads "
+                     "the CC_LANGFUSE_* names instead")
+    changed = [k for k, v in LANGFUSE_OPTIONS.items() if options.get(k) != v]
+    options.update(LANGFUSE_OPTIONS)
+    if changed:
+        notes.append(f"set pluginConfigs[\"{LANGFUSE_PLUGIN}\"].options "
+                     + ", ".join(f"{k}={json.dumps(LANGFUSE_OPTIONS[k])}" for k in changed))
+    return notes
+
+
+def setup_settings(act: Actions, tracing: dict) -> None:
+    path = claude_config_dir() / "settings.json"
+    say(f"Claude Code settings ({shown(path)}):")
+    real = Path(os.path.realpath(path))
+    try:
+        before = real.read_text(encoding="utf-8")
+        settings = json.loads(before)
+    except FileNotFoundError:
+        before, settings = None, {}
+    except (OSError, ValueError):
+        settings = None
+    if not isinstance(settings, dict):
+        raise SlanchaError(f"{shown(path)} is not a JSON object; fix it, then run slancha init "
+                           "again.")
+    if mentions_langfuse(settings.get("hooks")):
+        say("  Warning: settings.json has a hook that runs Langfuse. With the plugin installed "
+            "every turn would be sent twice; remove that hook. (slancha init adds none.)")
+    notes = merge_settings(settings, tracing)
+    after = json.dumps(settings, indent=2) + "\n"
+    private = before is not None and not real.stat().st_mode & 0o077
+    for note in notes:
+        note = note if act.dry_run else note.replace("remove env", "removed env", 1)
+        say(f"  {'would ' if act.dry_run else ''}{note}")
+    if after == before and private:
+        say("  already configured")
+        return
+    if act.dry_run:
+        say("  would write it atomically with mode 0600, because it would hold your org's "
+            "Langfuse secret key")
+        return
+    real.parent.mkdir(parents=True, exist_ok=True)
+    write_private(real, after)
+    say("  wrote it atomically with mode 0600 (readable only by you), because it now holds your "
+        "org's Langfuse secret key")
+
+
+def init(dry_run: bool) -> None:
+    cfg = load_config()
+    if cfg.token is None:
+        raise SlanchaError("No Slancha token on this machine: run slancha auth first.")
+    tracing = load_tracing()
+    missing = prerequisites()
+    if missing:
+        raise SlanchaError("\n".join(["slancha init needs:"] + [f"  - {m}" for m in missing]))
+    act = Actions(dry_run)
+    if dry_run:
+        say("Dry run: nothing is changed.")
+    installed = {row["id"] for row in json_list(["claude", "plugin", "list", "--json"])
+                 if isinstance(row.get("id"), str)}
+    markets = {row["name"]: row
+               for row in json_list(["claude", "plugin", "marketplace", "list", "--json"])
+               if isinstance(row.get("name"), str)}
+    setup_langfuse(act, installed, markets)
+    setup_slancha(act, installed, markets)
+    setup_settings(act, tracing)        # last: `claude plugin` writes settings.json too
+    for key in SDK_ENV:
+        if os.environ.get(key):
+            say(f"Warning: {key} is set in your shell. The Langfuse hook reads it before the "
+                "CC_LANGFUSE_* settings, so traces would go elsewhere; remove it from your shell "
+                "profile.")
+    if dry_run:
+        say("Dry run done; run slancha init without --dry-run to make these changes.")
+    else:
+        say(f"Done: Langfuse plugin at {LANGFUSE_COMMIT[:8]}, the Slancha plugin, and tracing to "
+            f"{tracing['host']}.", "Restart Claude Code (quit every running session) to load "
+            "them.")
+
+
+def cli(argv: list[str]) -> int:
+    """`slancha auth` and `slancha init`, from a terminal: exit 1 on a problem, 130 on Ctrl-C."""
+    parser = argparse.ArgumentParser(prog="slancha", description="Set up Slancha on this machine.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    au = commands.add_parser("auth", help="sign in; an org admin approves the code")
+    au.add_argument("--api", help="the Slancha API (default: SLANCHA_API_URL, config.json, "
+                                  f"{DEFAULT_API_URL})")
+    au.add_argument("--no-browser", action="store_true", help="only print the approval link")
+    ini = commands.add_parser("init", help="configure Claude Code for Slancha")
+    ini.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "auth":
+            auth(args.api, not args.no_browser)
+        else:
+            init(args.dry_run)
+    except KeyboardInterrupt:
+        say("", "Stopped. Nothing was saved." if args.command == "auth" else
+            "Stopped. Run slancha init again to finish; it skips what is already done.")
+        return 130
+    except SlanchaError as exc:
+        say(str(exc))
+        return 1
+    return 0
+
+
 # --- command line --------------------------------------------------------------------------------
 
 class _Parser(argparse.ArgumentParser):
@@ -960,6 +1454,8 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
         return 0
+    if argv[:1] in (["auth"], ["init"]):
+        return cli(argv)
     parser = _Parser(prog="slancha.py", description="Slancha skills for Claude Code.")
     commands = parser.add_subparsers(dest="command")
     up = commands.add_parser("update", help="install or update Slancha skills")
