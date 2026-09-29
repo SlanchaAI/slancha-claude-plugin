@@ -1,9 +1,10 @@
-"""A stand-in for the three Slancha API routes the plugin calls, built from the server's contract:
+"""A stand-in for the Slancha API routes the plugin calls, built from the server's contract:
 
 - GET  /api/skills                     the library: name, description, revision, active, ...
 - GET  /api/skills/{skill}/download    a zip of `<skill>/<path>` + `<skill>/slancha-manifest.json`,
                                        with X-Slancha-Revision and X-Slancha-Sha256 headers
 - POST /api/usage/skills               {events: [...]}, 1-500 per call, idempotent by id
+- POST /api/cli/device, /api/cli/token the device authorization grant (no token)
 
 Standard library only; runs in a thread on 127.0.0.1.
 """
@@ -20,6 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "slancha_pat_test-token-1"       # short on purpose: not shaped like a real token
+DEVICE_TOKEN = "slancha_pat_device-token-2"
+TRACING = {"host": "https://tracing.example.test", "public_key": "pk-test-public",
+           "secret_key": "sk-test-secret-value"}
 
 
 def sha256(data: bytes) -> str:
@@ -68,6 +72,12 @@ class FakeSlancha:
         self.zip_for = None                  # callable(skill, revision) -> (bytes, headers)
         self.usage_status: int | None = None     # answer usage posts with this status instead
         self.store_then_fail = False         # store the events, then answer 503 (a lost reply)
+        self.device_bodies: list[dict] = []  # what /api/cli/device and /api/cli/token received
+        self.pending = 1                     # polls answered authorization_pending before approval
+        self.outcome = "approve"             # or "expired", or "pending" (never approved)
+        self.expires_in = 600
+        self.polls = 0
+        self.tracing: dict | None = dict(TRACING)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -172,7 +182,32 @@ def _handler(fake: FakeSlancha):
                 headers = {"X-Slancha-Revision": revision, "X-Slancha-Sha256": sha256(data)}
             self.send(200, data, headers, "application/zip")
 
+        def device_flow(self, path: str):
+            """The device authorization grant; neither route takes a token."""
+            fake.requests.append((self.command, self.path, self.headers.get("Authorization")))
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            fake.device_bodies.append(body)
+            if path == "/api/cli/device":
+                return self.send_json(200, {
+                    "device_code": "device-code-1", "user_code": "WDJB-MJHT",
+                    "verification_uri": f"{fake.url}/cli",
+                    "verification_uri_complete": f"{fake.url}/cli?code=WDJB-MJHT",
+                    "expires_in": fake.expires_in, "interval": 1})
+            if body.get("device_code") != "device-code-1":
+                return self.send_json(400, {"error": "invalid_grant"})
+            fake.polls += 1
+            if fake.outcome == "expired":
+                return self.send_json(400, {"error": "expired_token"})
+            if fake.outcome == "pending" or fake.polls <= fake.pending:
+                return self.send_json(400, {"error": "authorization_pending"})
+            self.send(200, json.dumps({"token": DEVICE_TOKEN, "org_id": "org-1", "api": fake.url,
+                                       "tracing": fake.tracing}).encode(),
+                      {"Cache-Control": "no-store"})
+
         def do_POST(self):
+            path = urlsplit(self.path).path
+            if path in ("/api/cli/device", "/api/cli/token"):
+                return self.device_flow(path)
             if not self.admitted():
                 return
             if urlsplit(self.path).path != "/api/usage/skills":
