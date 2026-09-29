@@ -994,6 +994,7 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     if sys.version_info < (3, 9):
-        print("The Slancha plugin needs Python 3.9 or newer on PATH as python3.")
+        if sys.argv[1:2] not in (["hook"], ["flush"]):    # a hook's stdout can reach Claude
+            print("The Slancha plugin needs Python 3.9 or newer on PATH as python3.")
         sys.exit(0)
     sys.exit(main(sys.argv[1:]))
