@@ -1,0 +1,15 @@
+{
+  "name": "slancha",
+  "description": "Slancha's Claude Code plugin",
+  "owner": {
+    "name": "Slancha",
+    "url": "https://slancha.ai"
+  },
+  "plugins": [
+    {
+      "name": "slancha",
+      "source": "./",
+      "description": "Install and update the skills your Slancha library publishes, and report which revisions you use."
+    }
+  ]
+}

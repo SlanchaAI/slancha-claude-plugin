@@ -1,0 +1,14 @@
+{
+  "name": "slancha",
+  "displayName": "Slancha",
+  "version": "0.1.0",
+  "description": "Install and update the skills your Slancha library publishes, and report which revisions you use.",
+  "author": {
+    "name": "Slancha",
+    "url": "https://slancha.ai"
+  },
+  "homepage": "https://slancha.ai",
+  "repository": "https://github.com/SlanchaAI/slancha-claude-plugin",
+  "license": "Apache-2.0",
+  "keywords": ["skills", "slancha", "updates", "usage"]
+}
