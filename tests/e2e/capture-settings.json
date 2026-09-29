@@ -1,0 +1,9 @@
+{"hooks": {
+  "SessionStart": [{"hooks": [{"type": "command", "command": "cat > /tmp/capture/SessionStart-$(date +%s%N).json"}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "cat > /tmp/capture/UserPromptSubmit-$(date +%s%N).json"}]}],
+  "UserPromptExpansion": [{"hooks": [{"type": "command", "command": "cat > /tmp/capture/UserPromptExpansion-$(date +%s%N).json"}]}],
+  "PostToolUse": [{"matcher": "Skill", "hooks": [{"type": "command", "command": "cat > /tmp/capture/PostToolUse-$(date +%s%N).json"}]}],
+  "PostToolUseFailure": [{"matcher": "Skill", "hooks": [{"type": "command", "command": "cat > /tmp/capture/PostToolUseFailure-$(date +%s%N).json"}]}],
+  "Stop": [{"hooks": [{"type": "command", "command": "cat > /tmp/capture/Stop-$(date +%s%N).json"}]}],
+  "SessionEnd": [{"hooks": [{"type": "command", "command": "cat > /tmp/capture/SessionEnd-$(date +%s%N).json"}]}]
+}}

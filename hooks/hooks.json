@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/slancha.py\" hook || true",
-            "async": true
+            "timeout": 10
           }
         ]
       }
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/slancha.py\" hook || true",
-            "async": true
+            "timeout": 10
           }
         ]
       }
@@ -42,7 +42,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/slancha.py\" hook || true",
-            "async": true
+            "timeout": 10
           }
         ]
       }
@@ -53,7 +53,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/slancha.py\" hook || true",
-            "async": true
+            "timeout": 10
           }
         ]
       }
