@@ -556,15 +556,16 @@ def update(cfg: Config, project: str, skill: str | None, dry_run: bool, force: b
     for target in targets:
         lines.append(update_one(cfg, target, library.get(target.name), dry_run, force))
     if skill is None:
-        installed = {s.name for s in managed}
-        more = sorted(name for name, row in library.items()
-                      if name not in installed and published(row))
-        if more:
-            lines.append("Also in your library: " + ", ".join(more)
-                         + " (install one with /slancha:update <skill>)")
-        elif not managed:
-            lines.append("Your Slancha library has no published skills yet.")
+        lines += not_installed(library, managed) or (
+            [] if managed else ["Your Slancha library has no published skills yet."])
     return head + lines
+
+
+def not_installed(library: dict[str, dict], managed: list[Installed]) -> list[str]:
+    names = {s.name for s in managed}
+    more = sorted(name for name, row in library.items() if name not in names and published(row))
+    return [f"Also in your library: {', '.join(more)} (install one with /slancha:update <skill>)"
+            ] if more else []
 
 
 def install_new(cfg: Config, root: Path, skill: str, row: dict | None, dry_run: bool,
@@ -663,11 +664,7 @@ def status(cfg: Config, project: str) -> list[str]:
     if not managed:
         lines.append("No Slancha skills are installed here.")
     if library is not None:
-        names = {s.name for s in managed}
-        more = sorted(n for n, row in library.items() if n not in names and published(row))
-        if more:
-            lines.append("Also in your library: " + ", ".join(more)
-                         + " (install one with /slancha:update <skill>)")
+        lines += not_installed(library, managed)
     if offline:
         lines.append(offline)
     waiting = len(read_spool())
@@ -775,11 +772,9 @@ def flush(cfg: Config) -> str:
     with locked(cache / "flush.lock", blocking=False) as mine:
         if not mine:
             return "another upload is running"
-        now = time.time()
         with locked(cache / "spool.lock"):
-            spooled = read_spool()
-        pending = pending_events(spooled, now)
-        done = {str(e.get("id", "")).lower() for e in spooled} - {e["id"].lower() for e in pending}
+            pending = pending_events(read_spool(), time.time())
+        done: set[str] = set()     # ids the server stored, or refused for good
         sent, result = 0, "nothing to upload"
         if pending and cfg.problem:
             result = "not sent: " + cfg.problem.split(". ")[0]
@@ -804,17 +799,15 @@ def flush(cfg: Config) -> str:
                 sent += len(batch)
             result = f"sent {sent} event{'s' if sent != 1 else ''}" + (f"; {result}" if result
                                                                      else "")
-        with locked(cache / "spool.lock"):
-            keep = {}
-            for event in pending_events(read_spool(), time.time()):
-                if event["id"].lower() not in done:
-                    keep.setdefault(event["id"].lower(), event)
+        with locked(cache / "spool.lock"):     # events recorded meanwhile are kept
+            keep = [e for e in pending_events(read_spool(), time.time())
+                    if e["id"].lower() not in done]
             spool = cache / "usage.jsonl"
             if keep:
                 tmp = cache / f"usage.jsonl.{os.getpid()}.tmp"
                 with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
                                encoding="utf-8") as handle:
-                    handle.writelines(json.dumps(e, sort_keys=True) + "\n" for e in keep.values())
+                    handle.writelines(json.dumps(e, sort_keys=True) + "\n" for e in keep)
                 os.replace(tmp, spool)
             elif spool.exists():
                 spool.unlink()
