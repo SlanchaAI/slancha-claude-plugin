@@ -1425,6 +1425,109 @@ def init(dry_run: bool) -> None:
             "them.")
 
 
+# --- uninstall: undo init and auth on this machine ----------------------------------------------
+
+def unmerge_settings(settings: dict, tracing: dict | None) -> list[str]:
+    """Take out of Claude Code's settings in place what merge_settings put in; what changed. A
+    CC_LANGFUSE_* value that is not what tracing.json holds was set by someone else and stays."""
+    notes = []
+    env = settings.get("env")
+    if isinstance(env, dict):
+        ours = {"CC_LANGFUSE_PUBLIC_KEY": "public_key", "CC_LANGFUSE_SECRET_KEY": "secret_key",
+                "CC_LANGFUSE_BASE_URL": "host"}
+        present = [k for k in ours if k in env]
+        removed = [k for k in present if tracing is None or env[k] == tracing.get(ours[k])]
+        for key in removed:
+            del env[key]
+        if removed:
+            notes.append(f"remove env {', '.join(removed)}")
+        if len(removed) < len(present):
+            notes.append(f"keep env {', '.join(k for k in present if k not in removed)}: not the "
+                         "values slancha init wrote")
+    configs = settings.get("pluginConfigs")
+    entry = configs.get(LANGFUSE_PLUGIN) if isinstance(configs, dict) else None
+    options = entry.get("options") if isinstance(entry, dict) else None
+    if isinstance(options, dict):
+        removed = [k for k, v in LANGFUSE_OPTIONS.items() if k in options and options[k] == v]
+        for key in removed:
+            del options[key]
+        if removed:
+            notes.append(f"remove pluginConfigs[\"{LANGFUSE_PLUGIN}\"].options "
+                         + ", ".join(removed))
+        if not options and set(entry) == {"options"}:
+            del configs[LANGFUSE_PLUGIN]
+    return notes
+
+
+def teardown_settings(act: Actions, tracing: dict | None) -> None:
+    path = claude_config_dir() / "settings.json"
+    real = Path(os.path.realpath(path))
+    try:
+        before = real.read_text(encoding="utf-8")
+        settings = json.loads(before)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        settings = None
+    if not isinstance(settings, dict):
+        raise SlanchaError(f"{shown(path)} is not a JSON object; fix it, then run slancha "
+                           "uninstall again.")
+    notes = unmerge_settings(settings, tracing)
+    say(f"Claude Code settings ({shown(path)}):")
+    if not notes:
+        say("  nothing of Slancha's in it")
+        return
+    for note in notes:
+        say(f"  {'would ' if act.dry_run else ''}{note}")
+    if not act.dry_run:
+        write_private(real, json.dumps(settings, indent=2) + "\n")
+
+
+def uninstall(dry_run: bool) -> None:
+    """Undo slancha init and slancha auth on this machine. Skills it installed stay where they
+    are and stop updating; the personal token stays valid until it is revoked in the console."""
+    act = Actions(dry_run)
+    if dry_run:
+        say("Dry run: nothing is changed.")
+    tracing = read_json(config_dir() / "tracing.json")
+    tracing = tracing if isinstance(tracing, dict) else None
+    if shutil.which("claude") is None:
+        say("Claude Code is not on PATH: its plugins are left as they are.")
+    else:
+        installed = {row["id"] for row in json_list(["claude", "plugin", "list", "--json"])
+                     if isinstance(row.get("id"), str)}
+        markets = {row["name"] for row in json_list(["claude", "plugin", "marketplace", "list",
+                                                     "--json"]) if isinstance(row.get("name"), str)}
+        say("Claude Code plugins:")
+        for plugin in (SLANCHA_PLUGIN, LANGFUSE_PLUGIN):
+            if plugin in installed:
+                act.run(["claude", "plugin", "uninstall", plugin, "--scope", "user"])
+        for market in (SLANCHA_MARKETPLACE, LANGFUSE_MARKETPLACE):
+            if market in markets:
+                act.run(["claude", "plugin", "marketplace", "remove", market])
+    teardown_settings(act, tracing)     # after `claude plugin`, which writes settings.json too
+    unsent = len(read_spool())
+    share = Path.home() / ".local" / "share" / "slancha"
+    command = Path.home() / ".local" / "bin" / "slancha"
+    ours = command.is_file() and str(share / "slancha.py") in command.read_text(errors="replace")
+    say("Files:")
+    for path in [config_dir(), cache_dir(), share] + ([command] if ours else []):
+        if not path.exists():
+            continue
+        say(f"  {'would remove' if dry_run else 'removing'} {shown(path)}")
+        if not dry_run:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+    if unsent:
+        say(f"  {unsent} usage event{'s' if unsent != 1 else ''} not yet sent to Slancha "
+            f"{'would be' if dry_run else 'were'} dropped")
+    managed = [p.parent.name for p in user_skills_root().glob(f"*/{MANIFEST}")]
+    if managed:
+        say(f"Skills installed by Slancha stay in {shown(user_skills_root())} and no longer "
+            f"update: {', '.join(sorted(managed))}.")
+    say("Revoke the personal token in the Slancha console (Claude Code page) if it was this "
+        "machine's." if not dry_run else "Dry run done; run slancha uninstall without --dry-run.")
+
+
 def cli(argv: list[str]) -> int:
     """`slancha auth` and `slancha init`, from a terminal: exit 1 on a problem, 130 on Ctrl-C."""
     parser = argparse.ArgumentParser(prog="slancha", description="Set up Slancha on this machine.")
@@ -1437,17 +1540,21 @@ def cli(argv: list[str]) -> int:
     ini.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
     ini.add_argument("--check", action="store_true",
                      help="only check that this machine has what init needs; change nothing")
+    un = commands.add_parser("uninstall", help="undo slancha init and slancha auth on this machine")
+    un.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
     args = parser.parse_args(argv)
     try:
         if args.command == "auth":
             auth(args.api, not args.no_browser)
+        elif args.command == "uninstall":
+            uninstall(args.dry_run)
         elif args.check:
             check()
         else:
             init(args.dry_run)
     except KeyboardInterrupt:
         say("", "Stopped. Nothing was saved." if args.command == "auth" else
-            "Stopped. Run slancha init again to finish; it skips what is already done.")
+            f"Stopped. Run slancha {args.command} again to finish; it skips what is already done.")
         return 130
     except SlanchaError as exc:
         say(str(exc))
@@ -1478,7 +1585,7 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
         return 0
-    if argv[:1] in (["auth"], ["init"]):
+    if argv[:1] in (["auth"], ["init"], ["uninstall"]):
         return cli(argv)
     parser = _Parser(prog="slancha.py", description="Slancha skills for Claude Code.")
     commands = parser.add_subparsers(dest="command")

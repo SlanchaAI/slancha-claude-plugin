@@ -131,7 +131,8 @@ class AuthTests(SetupCase):
         self.assertFalse((self.config / "token").exists())
 
 
-class InitTests(SetupCase):
+class InitCase(SetupCase):
+    """Fake claude, git and uv on PATH, a token, tracing keys, and a settings.json to merge into."""
     def setUp(self):
         super().setUp()
         self.bin = self.home.parent / "bin"
@@ -167,6 +168,8 @@ class InitTests(SetupCase):
                 or c[3:4] == ["add"]
                 if c[:1] != ["uv"] and "rev-parse" not in c and "cat-file" not in c]
 
+
+class InitTests(InitCase):
     def test_configures_claude_code_and_is_idempotent(self):
         out = self.run_script("init")
         repo = str(self.home / ".local" / "share" / "slancha" / "langfuse-observability")
@@ -283,6 +286,76 @@ class InitTests(SetupCase):
         doc = json.loads((TESTS.parent / ".claude-plugin" / "marketplace.json").read_text())
         self.assertIn(f'\nSLANCHA_MARKETPLACE = "{doc["name"]}"', text)
         self.assertIn(f'\nLANGFUSE_COMMIT = "{PIN}"', text)
+
+
+class UninstallTests(InitCase):
+    def installed(self) -> dict:
+        """A machine after install.sh: init has run, and auth's files and the CLI are in place."""
+        self.run_script("init")
+        (self.config / "token").write_text(TOKEN)
+        (self.config / "config.json").write_text('{"api_url": "https://api.example.test"}')
+        share = self.home / ".local" / "share" / "slancha"
+        share.mkdir(parents=True, exist_ok=True)
+        (share / "slancha.py").write_text("# the CLI\n")
+        command = self.home / ".local" / "bin" / "slancha"
+        command.parent.mkdir(parents=True)
+        command.write_text(f'#!/bin/sh\nexec python3 "{share}/slancha.py" "$@"\n')
+        cache = self.home / ".cache" / "slancha"
+        cache.mkdir(parents=True)
+        (cache / "usage.jsonl").write_text('{"id": "e1"}\n{"id": "e2"}\n')
+        skill = self.home / ".claude" / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "slancha-manifest.json").write_text("{}")
+        return {"share": share, "command": command, "cache": cache, "skill": skill}
+
+    def test_undoes_init_and_auth_and_keeps_what_is_not_its_own(self):
+        paths = self.installed()
+        out = self.run_script("uninstall")
+        self.assertEqual(json.loads((self.home / "fake-claude.json").read_text()),
+                         {"markets": {}, "plugins": []})
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual(settings["model"], "opus")
+        self.assertEqual(settings["env"], {"FOO": "1"})          # init had removed the SDK names
+        self.assertEqual(settings["pluginConfigs"], {"other@market": {"options": {"a": 1}},
+                                                     LANGFUSE: {"options": {"CC_LANGFUSE_MAX_CHARS": 5}}})
+        self.assertEqual(settings.get("enabledPlugins"), {})
+        for gone in (self.config, paths["cache"], paths["share"], paths["command"]):
+            self.assertFalse(gone.exists(), gone)
+        self.assertTrue((paths["skill"] / "slancha-manifest.json").exists())
+        self.assertIn("2 usage events not yet sent to Slancha were dropped", out)
+        self.assertIn("stay in ~/.claude/skills and no longer update: demo", out)
+        self.assertIn("Revoke the personal token in the Slancha console", out)
+        again = self.run_script("uninstall")                     # nothing left to do
+        self.assertIn("nothing of Slancha's in it", again)
+        self.assertNotIn("removing", again)
+
+    def test_dry_run_changes_nothing(self):
+        paths = self.installed()
+        before = self.settings.read_text()
+        out = self.run_script("uninstall", "--dry-run")
+        self.assertIn("would run: claude plugin uninstall slancha@slancha --scope user", out)
+        self.assertIn("would remove env CC_LANGFUSE_PUBLIC_KEY, CC_LANGFUSE_SECRET_KEY, "
+                      "CC_LANGFUSE_BASE_URL", out)
+        self.assertEqual(self.settings.read_text(), before)
+        for kept in (self.config / "token", paths["cache"], paths["share"], paths["command"]):
+            self.assertTrue(kept.exists(), kept)
+        self.assertEqual(len(json.loads((self.home / "fake-claude.json").read_text())["plugins"]), 2)
+
+    def test_a_langfuse_key_someone_else_set_stays(self):
+        self.installed()
+        settings = json.loads(self.settings.read_text())
+        settings["env"]["CC_LANGFUSE_BASE_URL"] = "https://their-own.example.test"
+        self.settings.write_text(json.dumps(settings))
+        out = self.run_script("uninstall")
+        env = json.loads(self.settings.read_text())["env"]
+        self.assertEqual(env, {"FOO": "1", "CC_LANGFUSE_BASE_URL": "https://their-own.example.test"})
+        self.assertIn("keep env CC_LANGFUSE_BASE_URL: not the values slancha init wrote", out)
+
+    def test_a_command_named_slancha_that_is_not_ours_stays(self):
+        paths = self.installed()
+        paths["command"].write_text("#!/bin/sh\necho someone else's slancha\n")
+        self.run_script("uninstall")
+        self.assertTrue(paths["command"].exists())
 
 
 class ReleaseTests(unittest.TestCase):

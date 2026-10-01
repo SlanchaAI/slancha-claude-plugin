@@ -43,6 +43,19 @@ def claude(args: list[str]) -> int:
         settings = json.loads(path.read_text()) if path.exists() else {}
         settings.setdefault("enabledPlugins", {})[args[2]] = True
         path.write_text(json.dumps(settings, indent=2))
+    elif args[:2] == ["plugin", "uninstall"] and args[3:] == ["--scope", "user"]:
+        if args[2] not in state["plugins"]:
+            print(f"{args[2]} is not installed", file=sys.stderr)
+            return 1
+        state["plugins"].remove(args[2])
+        path = settings_path()
+        settings = json.loads(path.read_text()) if path.exists() else {}
+        settings.get("enabledPlugins", {}).pop(args[2], None)
+        path.write_text(json.dumps(settings, indent=2))
+    elif args[:3] == ["plugin", "marketplace", "remove"]:
+        if state["markets"].pop(args[3], None) is None:
+            print(f"marketplace {args[3]} not found", file=sys.stderr)
+            return 1
     else:
         print(f"fake claude: unexpected {args}", file=sys.stderr)
         return 2

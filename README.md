@@ -57,6 +57,11 @@ python3 scripts/slancha.py init --dry-run    # says what it would change
 python3 scripts/slancha.py init
 ```
 
+To undo it, run `slancha uninstall` (`--dry-run` first says what it would do). It removes both
+plugins and their marketplaces, Slancha's entries in `settings.json` (keeping any value it did
+not write), the token, the API setting, the tracing keys, the usage cache and the CLI. Skills it
+installed stay where they are and stop updating. Revoke the token in the Slancha console.
+
 `init` is safe to run again: it skips what is already done. It refuses a `langfuse-observability`
 marketplace that is not the pinned clone, and warns about a Langfuse hook you added to
 `settings.json` by hand (it would send every turn twice).
