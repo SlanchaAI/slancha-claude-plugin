@@ -329,6 +329,14 @@ class NetworkTests(PluginCase):
         self.assertEqual(elsewhere.requests, [])
         self.assertFalse((self.skills / "demo").exists())
 
+    def test_an_api_that_is_not_slancha_names_the_setting_to_fix(self):
+        self.api.not_slancha = True
+        out = self.run_script("update", "demo")
+        self.assertIn("Slancha answered HTTP 429.", out)
+        self.assertIn("your Slancha API? The Claude Code page of your Slancha console", out)
+        self.assertIn("set SLANCHA_API_URL", out)
+        self.assertFalse((self.skills / "demo").exists())
+
     def test_api_down_exits_zero_with_a_message(self):
         env = {**self.env, "SLANCHA_API_URL": closed_port_url()}
         self.assertIn("Cannot reach 127.0.0.1", self.run_script("update", env=env))

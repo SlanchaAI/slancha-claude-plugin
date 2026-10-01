@@ -22,6 +22,9 @@ from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "slancha_pat_test-token-1"       # short on purpose: not shaped like a real token
 DEVICE_TOKEN = "slancha_pat_device-token-2"
+# What https://api.slancha.ai answered every request with on 2026-09-30: an AWS throttle, no detail.
+NOT_SLANCHA = {"Reason": "ReservedFunctionConcurrentInvocationLimitExceeded", "Type": "User",
+               "message": "Rate Exceeded."}
 TRACING = {"host": "https://tracing.example.test", "public_key": "pk-test-public",
            "secret_key": "sk-test-secret-value"}
 
@@ -69,6 +72,7 @@ class FakeSlancha:
         self.usage: dict[str, dict] = {}     # stored events by id
         self.requests: list[tuple[str, str, str | None]] = []
         self.redirect: str | None = None     # answer everything with a 302 to this origin
+        self.not_slancha = False             # answer everything as a throttled AWS front would
         self.zip_for = None                  # callable(skill, revision) -> (bytes, headers)
         self.usage_status: int | None = None     # answer usage posts with this status instead
         self.store_then_fail = False         # store the events, then answer 503 (a lost reply)
@@ -153,6 +157,9 @@ def _handler(fake: FakeSlancha):
 
         def admitted(self) -> bool:
             fake.requests.append((self.command, self.path, self.headers.get("Authorization")))
+            if fake.not_slancha:
+                self.send_json(429, NOT_SLANCHA)
+                return False
             if fake.redirect:
                 self.send(302, headers={"Location": fake.redirect + self.path})
                 return False
@@ -187,6 +194,8 @@ def _handler(fake: FakeSlancha):
             fake.requests.append((self.command, self.path, self.headers.get("Authorization")))
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             fake.device_bodies.append(body)
+            if fake.not_slancha:
+                return self.send_json(429, NOT_SLANCHA)
             if path == "/api/cli/device":
                 return self.send_json(200, {
                     "device_code": "device-code-1", "user_code": "WDJB-MJHT",

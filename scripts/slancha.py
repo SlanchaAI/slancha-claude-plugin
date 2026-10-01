@@ -242,6 +242,12 @@ def _detail(error: urllib.error.HTTPError) -> str:
     return "".join(c if c.isprintable() else " " for c in detail)[:200]
 
 
+# What an API that is not this console's looks like from here: a 404 or 429 with no Slancha
+# `detail`. The default, https://api.slancha.ai, answers every request that way today.
+WRONG_API = (" Is {host} your Slancha API? The Claude Code page of your Slancha console shows the "
+             "commands with it: set SLANCHA_API_URL, or run slancha auth --api <url>.")
+
+
 def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 20,
             limit: int = MAX_JSON_BYTES, accept: str = "application/json"):
     """(headers, bytes) of a successful answer; raises Offline, ApiError or SlanchaError."""
@@ -271,6 +277,8 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
                        "Slancha console (Claude Code page) and store it again.")
         else:
             message = f"Slancha answered HTTP {error.code}" + (f": {detail}" if detail else ".")
+            if error.code in (404, 429) and not detail:
+                message += WRONG_API.format(host=host)
         raise ApiError(error.code, message) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", None) or error.__class__.__name__
@@ -993,10 +1001,12 @@ def post_public(api: str, path: str, body: dict, timeout: float = 20) -> tuple[i
     return status, doc if isinstance(doc, dict) else {}
 
 
-def answered(status: int, doc: dict) -> str:
+def answered(status: int, doc: dict, api: str) -> str:
     detail = doc.get("detail") or doc.get("error")
-    return f"Slancha answered HTTP {status}" + (f": {printable(detail, 200)}"
-                                                if isinstance(detail, str) else ".")
+    if not isinstance(detail, str):
+        hint = WRONG_API.format(host=urllib.parse.urlsplit(api).netloc) if status in (404, 429) else ""
+        return f"Slancha answered HTTP {status}.{hint}"
+    return f"Slancha answered HTTP {status}: {printable(detail, 200)}"
 
 
 def read_config_json() -> dict:
@@ -1030,7 +1040,7 @@ def start_device(api: str) -> dict:
     client = f"slancha CLI on {socket.gethostname().split('.')[0] or 'an unnamed host'}"
     status, doc = post_public(api, "/api/cli/device", {"client": client})
     if status != 200:
-        raise ApiError(status, answered(status, doc))
+        raise ApiError(status, answered(status, doc, api))
     uri = doc.get("verification_uri_complete")
     parts = urllib.parse.urlsplit(uri) if isinstance(uri, str) else None
     ok = (isinstance(doc.get("device_code"), str) and doc["device_code"]
@@ -1086,7 +1096,7 @@ def wait_for_approval(api: str, device_code: str, expires_in: int, interval: int
             raise SlanchaError(EXPIRED)
         if status == 400 and error == "access_denied":
             raise SlanchaError("The request was denied in the Slancha console. Nothing was saved.")
-        raise ApiError(status, answered(status, doc) + " Nothing was saved.")
+        raise ApiError(status, answered(status, doc, api) + " Nothing was saved.")
     raise SlanchaError(EXPIRED)
 
 

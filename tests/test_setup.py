@@ -86,6 +86,14 @@ class AuthTests(SetupCase):
         out = self.run_script("auth", "--api", "http://example.test", env=env, code=1)
         self.assertIn("--api must be an https:// URL", out)
 
+    def test_an_api_that_is_not_slancha_names_the_setting_to_fix(self):
+        self.api.not_slancha = True
+        out = self.run_script("auth", "--no-browser", code=1)
+        self.assertIn("Slancha answered HTTP 429.", out)
+        self.assertIn("your Slancha API? The Claude Code page of your Slancha console", out)
+        self.assertIn("or run slancha auth --api <url>", out)
+        self.assertFalse((self.config / "token").exists())
+
     def test_expired(self):
         self.api.outcome = "expired"
         out = self.run_script("auth", "--no-browser", code=1)
