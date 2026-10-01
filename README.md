@@ -17,20 +17,23 @@ To set up a machine for Slancha (this plugin, and tracing of your Claude Code se
 org's Langfuse project), run as yourself, not as root:
 
 ```sh
-curl -fsSL https://dev.slancha.ai/install.sh | sh
+curl -fsSL https://dev.slancha.ai/install.sh | SLANCHA_API_URL=<your Slancha API> sh
 ```
 
-(The production URL comes later.) It says what it will do first, then:
+Copy the exact line from the Claude Code page of your Slancha console: it names your API. (The
+production URL comes later.) It says what it will do first, then:
 
 1. downloads `scripts/slancha.py` from this repository at a pinned commit and checks its sha256;
 2. installs it as `~/.local/share/slancha/slancha.py`, with a `~/.local/bin/slancha` command;
-3. runs `slancha auth`: prints a code and a link, and opens the link in your browser if there is
+3. runs `slancha init --check`: stops if `claude`, `git` or `uv` is missing, before anyone
+   approves a sign-in;
+4. runs `slancha auth`: prints a code and a link, and opens the link in your browser if there is
    one. An admin of your Slancha org approves the code in the console; nothing is pasted
    anywhere. It saves, readable only by you (mode 0600, in a 0700 directory):
    - `~/.config/slancha/token`: your personal token;
    - `~/.config/slancha/config.json`: `api_url`, the API you signed in to;
    - `~/.config/slancha/tracing.json`: your org's Langfuse host and keys, when it has them;
-4. runs `slancha init`, which needs `claude`, `git` and `uv` on `PATH` and a Python 3.10 or newer
+5. runs `slancha init`, which needs `claude`, `git` and `uv` on `PATH` and a Python 3.10 or newer
    that uv can find (it says which are missing):
    - clones [Langfuse's Claude Code plugin](https://github.com/langfuse/claude-observability-plugin)
      into `~/.local/share/slancha/langfuse-observability`, checks out the pinned commit
@@ -43,12 +46,13 @@ curl -fsSL https://dev.slancha.ai/install.sh | sh
      every program Claude Code starts); the Langfuse plugin's options get skill tags on and
      image upload off. The file then holds a secret, so it is rewritten with mode 0600.
 
-Restart Claude Code afterwards. `SLANCHA_API_URL` picks another Slancha API.
+Restart Claude Code afterwards.
 
 To do the same by hand, with `scripts/slancha.py` from this repository:
 
 ```sh
-python3 scripts/slancha.py auth              # --api URL, --no-browser
+python3 scripts/slancha.py init --check     # claude, git and uv are there
+python3 scripts/slancha.py auth --api URL    # --no-browser to only print the link
 python3 scripts/slancha.py init --dry-run    # says what it would change
 python3 scripts/slancha.py init
 ```
@@ -78,10 +82,13 @@ Or from your shell: `claude plugin marketplace add SlanchaAI/slancha-claude-plug
 
    ```sh
    umask 077; mkdir -p ~/.config/slancha; printf '%s' '<token>' > ~/.config/slancha/token
+   printf '{"api_url": "%s"}\n' '<your Slancha API>' > ~/.config/slancha/config.json
    ```
 
-   Start the line with a space if your shell leaves such lines out of its history. You can set
-   `SLANCHA_TOKEN` in your environment instead.
+   The second line tells the plugin which API the token belongs to; the console's Claude Code
+   page shows both lines with your API filled in. Start the lines with a space if your shell
+   leaves such lines out of its history. You can set `SLANCHA_TOKEN` and `SLANCHA_API_URL` in your
+   environment instead.
 3. In Claude Code, run `/slancha:update <skill>` to install a skill, and `/slancha:update` later
    to update it.
 
@@ -133,7 +140,7 @@ last upload went.
 | Setting | Default |
 |---|---|
 | `SLANCHA_TOKEN`, or `~/.config/slancha/token` | none: `/slancha:update` explains how to add one |
-| `SLANCHA_API_URL`, or `{"api_url": "..."}` in `~/.config/slancha/config.json` | `https://api.slancha.ai` |
+| `SLANCHA_API_URL`, or `{"api_url": "..."}` in `~/.config/slancha/config.json` | `https://api.slancha.ai`, which does not serve Slancha yet: use the API your console shows |
 
 Only `https://` URLs are accepted (`http://` only for `127.0.0.1` and `localhost`).
 
