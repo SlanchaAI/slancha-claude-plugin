@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -282,6 +283,28 @@ class InitTests(SetupCase):
         doc = json.loads((TESTS.parent / ".claude-plugin" / "marketplace.json").read_text())
         self.assertIn(f'\nSLANCHA_MARKETPLACE = "{doc["name"]}"', text)
         self.assertIn(f'\nLANGFUSE_COMMIT = "{PIN}"', text)
+
+
+class ReleaseTests(unittest.TestCase):
+    def test_the_plugin_and_the_cli_carry_one_version(self):
+        # Claude Code updates an installed plugin only when plugin.json's version changes, and
+        # scripts/release.sh sets both; a hand edit to one would ship two versions.
+        manifest = json.loads((TESTS.parent / ".claude-plugin" / "plugin.json").read_text())
+        self.assertIn(f'\nVERSION = "{manifest["version"]}"\n', SCRIPT.read_text())
+
+    def test_the_released_installer_takes_no_pin_from_the_environment(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed here; CI runs this")
+        result = subprocess.run(["bash", str(TESTS.parent / "scripts" / "release.sh"), "installer"],
+                                cwd=TESTS.parent, capture_output=True, text=True, timeout=60)
+        if result.returncode and "commit scripts/slancha.py" in result.stderr:
+            self.skipTest("uncommitted changes: the installer names a commit")
+        if result.returncode and "not a git repository" in result.stderr:
+            self.skipTest("not a git checkout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("PLACEHOLDER", result.stdout)
+        self.assertRegex(result.stdout, r'\nSLANCHA_REF="[0-9a-f]{40}"\n')
+        self.assertRegex(result.stdout, r'\nSLANCHA_SHA256="[0-9a-f]{64}"\n')
 
 
 if __name__ == "__main__":
