@@ -1383,6 +1383,16 @@ def setup_settings(act: Actions, tracing: dict) -> None:
         "org's Langfuse secret key")
 
 
+def check() -> None:
+    """What init needs on this machine, before anything else. install.sh runs it ahead of slancha
+    auth, so a missing tool is found before an admin has approved a sign-in for it."""
+    missing = prerequisites()
+    if missing:
+        raise SlanchaError("\n".join(["Slancha needs, on this machine:"]
+                                     + [f"  - {m}" for m in missing]))
+    say("This machine has what slancha init needs: claude, git, and uv with Python 3.10 or newer.")
+
+
 def init(dry_run: bool) -> None:
     cfg = load_config()
     if cfg.token is None:
@@ -1425,10 +1435,14 @@ def cli(argv: list[str]) -> int:
     au.add_argument("--no-browser", action="store_true", help="only print the approval link")
     ini = commands.add_parser("init", help="configure Claude Code for Slancha")
     ini.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
+    ini.add_argument("--check", action="store_true",
+                     help="only check that this machine has what init needs; change nothing")
     args = parser.parse_args(argv)
     try:
         if args.command == "auth":
             auth(args.api, not args.no_browser)
+        elif args.check:
+            check()
         else:
             init(args.dry_run)
     except KeyboardInterrupt:

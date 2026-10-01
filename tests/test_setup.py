@@ -235,6 +235,18 @@ class InitTests(SetupCase):
         self.assertIn("uv python install 3.12", out)
         self.assertNotIn("`uv` is not on PATH", out)
 
+    def test_check_needs_no_sign_in_and_changes_nothing(self):
+        del self.env["SLANCHA_TOKEN"]
+        (self.config / "tracing.json").unlink()
+        self.assertIn("This machine has what slancha init needs", self.run_script("init", "--check"))
+        (self.bin / "git").unlink()
+        out = self.run_script("init", "--check", code=1)
+        self.assertIn("Slancha needs, on this machine:", out)
+        self.assertIn("`git` is not on PATH", out)
+        self.assertEqual(self.changing(), [])
+        self.assertEqual(json.loads(self.settings.read_text())["model"], "opus")
+        self.assertFalse((self.config / "token").exists())
+
     def test_needs_auth_first(self):
         del self.env["SLANCHA_TOKEN"]
         self.assertIn("run slancha auth first", self.run_script("init", code=1))
