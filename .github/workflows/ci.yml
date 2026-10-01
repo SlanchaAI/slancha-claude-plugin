@@ -1,0 +1,29 @@
+name: CI
+
+# The plugin's checks on every push to main and every pull request: the unit tests on the oldest
+# and newest Python it supports, the plugin validated and run in the real Claude Code binary, the
+# release checks (they need git, which the test images lack), and the pre-push scan for secrets
+# and private names, since this repository is public.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests, Python 3.9 and 3.12 (Docker)
+        run: bash scripts/test.sh
+      - name: Release checks
+        run: python3 -m unittest discover -s tests -p test_setup.py -k ReleaseTests
+      - name: Validate the plugin and run it in Claude Code (Docker)
+        run: bash scripts/e2e.sh
+      - name: Pre-push scan
+        run: bash scripts/prepush_scan.sh
