@@ -11,8 +11,8 @@ Standard library only, Python 3.9 or newer. The plugin's commands and hooks run 
 
 From a terminal, to set up a machine (install.sh runs both):
 
-    slancha.py auth [--api URL] [--no-browser]   sign in; an org admin approves the code
-    slancha.py init [--dry-run]                  configure Claude Code: plugins and tracing
+    slancha.py auth [--api URL] [--no-browser]   sign in for skills; --tracing requires an org admin
+    slancha.py init [--dry-run]                  configure the skill plugin; tracing is opt-in
 
 The token is a personal token from the Slancha console, read from SLANCHA_TOKEN or from
 ~/.config/slancha/token. It goes only to the configured API origin, only over HTTPS, and is never
@@ -1026,9 +1026,9 @@ def write_private(path: Path, text: str) -> None:
         raise
 
 
-def start_device(api: str) -> dict:
+def start_device(api: str, tracing: bool = False) -> dict:
     client = f"slancha CLI on {socket.gethostname().split('.')[0] or 'an unnamed host'}"
-    status, doc = post_public(api, "/api/cli/device", {"client": client})
+    status, doc = post_public(api, "/api/cli/device", {"client": client, "tracing": tracing})
     if status != 200:
         raise ApiError(status, answered(status, doc))
     uri = doc.get("verification_uri_complete")
@@ -1090,17 +1090,17 @@ def wait_for_approval(api: str, device_code: str, expires_in: int, interval: int
     raise SlanchaError(EXPIRED)
 
 
-def auth(api_arg: str | None, browser: bool) -> None:
+def auth(api_arg: str | None, browser: bool, tracing_requested: bool = False) -> None:
     api = check_url(api_arg, "--api") if api_arg else api_base()
     settings = read_config_json()        # checked now: a broken file must not cost an approval
-    device = start_device(api)
+    device = start_device(api, tracing_requested)
     uri = printable(device["verification_uri_complete"], 1000)
     minutes = max(1, device["expires_in"] // 60)
     say(f"Signing in to Slancha at {api}.", "",
         f"  Your code:  {printable(device['user_code'], 40)}",
         f"  Approve at: {uri}", "",
-        "An admin of your Slancha org approves this request on that page (check that it shows the "
-        "same code).", f"Waiting up to {minutes} min for the approval; Ctrl-C stops.")
+        ("An admin of your Slancha org approves this tracing request." if tracing_requested else
+         "Approve your own skill access on that page."), "Check that it shows the same code.", f"Waiting up to {minutes} min for the approval; Ctrl-C stops.")
     if browser:
         open_browser(device["verification_uri_complete"])
     doc = wait_for_approval(api, device["device_code"], device["expires_in"],
@@ -1141,11 +1141,10 @@ def auth(api_arg: str | None, browser: bool) -> None:
              f"  ~/.config/slancha/config.json  api_url {api}"]
     if tracing is not None:
         lines += [f"  ~/.config/slancha/tracing.json your org's tracing keys ({tracing['host']})",
-                  "Next: slancha init"]
+                  "Next: slancha init --tracing"]
     else:
         lines += [("Removed ~/.config/slancha/tracing.json from an earlier sign-in. " if stale
-                   else "") + "Your org sent no tracing keys, and slancha init needs them: ask an "
-                  "org admin to set up tracing in the console, then run slancha auth again."]
+                   else "") + "Skills are ready without tracing. Next: slancha init."]
     if os.environ.get("SLANCHA_TOKEN"):
         lines.append("Note: SLANCHA_TOKEN is set in this shell and takes precedence over the "
                      "saved token; unset it to use the new one.")
@@ -1189,13 +1188,15 @@ def must(cmd: list[str]) -> str:
     return result.stdout
 
 
-def prerequisites() -> list[str]:
+def prerequisites(tracing: bool = False) -> list[str]:
     missing = []
-    for tool, what in (("claude", "Claude Code"), ("git", "git"),
-                       ("uv", "uv (https://docs.astral.sh/uv/), which runs the Langfuse hook")):
+    tools = [("claude", "Claude Code"), ("git", "git")]
+    if tracing:
+        tools.append(("uv", "uv (https://docs.astral.sh/uv/), which runs the Langfuse hook"))
+    for tool, what in tools:
         if shutil.which(tool) is None:
             missing.append(f"`{tool}` is not on PATH: install {what}.")
-    if shutil.which("uv") and run(["uv", "python", "find", ">=3.10"]).returncode != 0:
+    if tracing and shutil.which("uv") and run(["uv", "python", "find", ">=3.10"]).returncode != 0:
         missing.append("uv finds no Python 3.10 or newer, which the Langfuse hook needs: run "
                        "`uv python install 3.12`.")
     return missing
@@ -1373,12 +1374,12 @@ def setup_settings(act: Actions, tracing: dict) -> None:
         "org's Langfuse secret key")
 
 
-def init(dry_run: bool) -> None:
+def init(dry_run: bool, with_tracing: bool = False) -> None:
     cfg = load_config()
     if cfg.token is None:
         raise SlanchaError("No Slancha token on this machine: run slancha auth first.")
-    tracing = load_tracing()
-    missing = prerequisites()
+    tracing = load_tracing() if with_tracing else None
+    missing = prerequisites(with_tracing)
     if missing:
         raise SlanchaError("\n".join(["slancha init needs:"] + [f"  - {m}" for m in missing]))
     act = Actions(dry_run)
@@ -1389,38 +1390,44 @@ def init(dry_run: bool) -> None:
     markets = {row["name"]: row
                for row in json_list(["claude", "plugin", "marketplace", "list", "--json"])
                if isinstance(row.get("name"), str)}
-    setup_langfuse(act, installed, markets)
+    if tracing is not None:
+        setup_langfuse(act, installed, markets)
     setup_slancha(act, installed, markets)
-    setup_settings(act, tracing)        # last: `claude plugin` writes settings.json too
-    for key in SDK_ENV:
-        if os.environ.get(key):
-            say(f"Warning: {key} is set in your shell. The Langfuse hook reads it before the "
-                "CC_LANGFUSE_* settings, so traces would go elsewhere; remove it from your shell "
-                "profile.")
+    if tracing is not None:
+        setup_settings(act, tracing)
+        for key in SDK_ENV:
+            if os.environ.get(key):
+                say(f"Warning: {key} is set in your shell. The Langfuse hook reads it before the "
+                    "CC_LANGFUSE_* settings, so traces would go elsewhere; remove it from your "
+                    "shell profile.")
     if dry_run:
-        say("Dry run done; run slancha init without --dry-run to make these changes.")
+        say("Dry run done; run slancha init" + (" --tracing" if with_tracing else "") +
+            " without --dry-run to make these changes.")
     else:
-        say(f"Done: Langfuse plugin at {LANGFUSE_COMMIT[:8]}, the Slancha plugin, and tracing to "
-            f"{tracing['host']}.", "Restart Claude Code (quit every running session) to load "
-            "them.")
+        say((f"Done: Langfuse plugin at {LANGFUSE_COMMIT[:8]}, the Slancha plugin, and tracing to "
+             f"{tracing['host']}." if tracing is not None else
+             "Done: Slancha skill plugin installed. No tracing was configured."),
+            "Restart Claude Code (quit every running session) to load the plugins.")
 
 
 def cli(argv: list[str]) -> int:
     """`slancha auth` and `slancha init`, from a terminal: exit 1 on a problem, 130 on Ctrl-C."""
     parser = argparse.ArgumentParser(prog="slancha", description="Set up Slancha on this machine.")
     commands = parser.add_subparsers(dest="command", required=True)
-    au = commands.add_parser("auth", help="sign in; an org admin approves the code")
+    au = commands.add_parser("auth", help="sign in for skills; --tracing requires an org admin")
     au.add_argument("--api", help="the Slancha API (default: SLANCHA_API_URL, config.json, "
                                   f"{DEFAULT_API_URL})")
     au.add_argument("--no-browser", action="store_true", help="only print the approval link")
     ini = commands.add_parser("init", help="configure Claude Code for Slancha")
     ini.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
+    au.add_argument("--tracing", action="store_true", help="also request tracing keys (org admin only)")
+    ini.add_argument("--tracing", action="store_true", help="also install and configure tracing")
     args = parser.parse_args(argv)
     try:
         if args.command == "auth":
-            auth(args.api, not args.no_browser)
+            auth(args.api, not args.no_browser, args.tracing)
         else:
-            init(args.dry_run)
+            init(args.dry_run, args.tracing)
     except KeyboardInterrupt:
         say("", "Stopped. Nothing was saved." if args.command == "auth" else
             "Stopped. Run slancha init again to finish; it skips what is already done.")

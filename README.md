@@ -13,49 +13,53 @@ It needs `python3` 3.9 or newer on your `PATH` (macOS, Linux or WSL). It install
 
 ## Set up in one line
 
-To set up a machine for Slancha (this plugin, and tracing of your Claude Code sessions to your
-org's Langfuse project), run as yourself, not as root:
+To install shared skills, run as yourself, not as root:
 
 ```sh
 curl -fsSL https://dev.slancha.ai/install.sh | sh
 ```
 
-(The production URL comes later.) It says what it will do first, then:
+The installer downloads a pinned, SHA-256-checked CLI, runs `slancha auth`, then
+`slancha init`. Sign in to the console and approve your own code for the selected
+organization. Any member can connect; no tracing project or tracing keys are required.
+The token and API configuration are saved under `~/.config/slancha`, readable only
+by you. Setup needs `claude`, `git`, and Python 3.9 or newer.
 
-1. downloads `scripts/slancha.py` from this repository at a pinned commit and checks its sha256;
-2. installs it as `~/.local/share/slancha/slancha.py`, with a `~/.local/bin/slancha` command;
-3. runs `slancha auth`: prints a code and a link, and opens the link in your browser if there is
-   one. An admin of your Slancha org approves the code in the console; nothing is pasted
-   anywhere. It saves, readable only by you (mode 0600, in a 0700 directory):
-   - `~/.config/slancha/token`: your personal token;
-   - `~/.config/slancha/config.json`: `api_url`, the API you signed in to;
-   - `~/.config/slancha/tracing.json`: your org's Langfuse host and keys, when it has them;
-4. runs `slancha init`, which needs `claude`, `git` and `uv` on `PATH` and a Python 3.10 or newer
-   that uv can find (it says which are missing):
-   - clones [Langfuse's Claude Code plugin](https://github.com/langfuse/claude-observability-plugin)
-     into `~/.local/share/slancha/langfuse-observability`, checks out the pinned commit
-     `b5211009`, and installs it from there (`langfuse-observability@langfuse-observability`);
-   - installs this plugin (`slancha@slancha`);
-   - merges into `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`), keeping
-     everything else: `env` gets `CC_LANGFUSE_PUBLIC_KEY`, `CC_LANGFUSE_SECRET_KEY` and
-     `CC_LANGFUSE_BASE_URL`, and loses any `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`,
-     `LANGFUSE_HOST` or `LANGFUSE_BASE_URL` (the SDK's own names would reroute the traces of
-     every program Claude Code starts); the Langfuse plugin's options get skill tags on and
-     image upload off. The file then holds a secret, so it is rewritten with mode 0600.
+Restart Claude Code afterwards, then run `/slancha:update <skill>` to install an
+approved skill. `SLANCHA_API_URL` picks another Slancha API.
 
-Restart Claude Code afterwards. `SLANCHA_API_URL` picks another Slancha API.
-
-To do the same by hand, with `scripts/slancha.py` from this repository:
+To run setup by hand:
 
 ```sh
 python3 scripts/slancha.py auth              # --api URL, --no-browser
-python3 scripts/slancha.py init --dry-run    # says what it would change
+python3 scripts/slancha.py init --dry-run
 python3 scripts/slancha.py init
 ```
 
-`init` is safe to run again: it skips what is already done. It refuses a `langfuse-observability`
-marketplace that is not the pinned clone, and warns about a Langfuse hook you added to
-`settings.json` by hand (it would send every turn twice).
+## Optional tracing
+
+Tracing is a separate opt-in. After an operator connects a Langfuse project, an org
+admin can request its tracing credentials and configure tracing:
+
+```sh
+slancha auth --tracing
+slancha init --tracing --dry-run
+slancha init --tracing
+```
+
+Tracing setup additionally needs `uv` and Python 3.10 or newer. It installs
+[Langfuse's Claude Code plugin](https://github.com/langfuse/claude-observability-plugin)
+at pinned commit `b5211009` and merges tracing settings into
+`~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`). Existing settings
+are preserved; skill tags are enabled and image upload is disabled. Credentials use
+`CC_LANGFUSE_PUBLIC_KEY`, `CC_LANGFUSE_SECRET_KEY`, and `CC_LANGFUSE_BASE_URL`;
+SDK-level Langfuse environment variables are removed to avoid routing other programs'
+traces. Files containing secrets are written with mode 0600.
+
+`init --tracing` is safe to repeat. It refuses an observability marketplace outside
+the pinned clone and warns about duplicate manual tracing hooks. Plain `init` does
+not configure tracing. Mining access is a separate premium entitlement; connecting
+tracing does not enable mining.
 
 ## Install
 

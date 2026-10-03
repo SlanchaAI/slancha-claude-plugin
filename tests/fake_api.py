@@ -201,7 +201,7 @@ def _handler(fake: FakeSlancha):
             if fake.outcome == "pending" or fake.polls <= fake.pending:
                 return self.send_json(400, {"error": "authorization_pending"})
             self.send(200, json.dumps({"token": DEVICE_TOKEN, "org_id": "org-1", "api": fake.url,
-                                       "tracing": fake.tracing}).encode(),
+                                       "tracing": fake.tracing if fake.device_bodies[0].get("tracing") else None}).encode(),
                       {"Cache-Control": "no-store"})
 
         def do_POST(self):
