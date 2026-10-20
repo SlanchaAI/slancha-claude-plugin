@@ -304,6 +304,8 @@ class JobTests(AgentCase):
         self.assertEqual(self.sent(f"/api/skills/demo/scan"), {})
         self.assertIn("  queued", out)
         self.assertIn(f"Job job_2  scan  demo  {self.v1[:12]}  succeeded", out)
+        doc = self.as_json("scan", "demo")
+        self.assertEqual((doc["id"], doc["type"], doc["status"]), ("job_3", "scan", "queued"))
 
 
 class DraftAndOutcomesTests(AgentCase):
