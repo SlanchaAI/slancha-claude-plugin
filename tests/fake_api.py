@@ -179,16 +179,21 @@ class FakeSlancha:
         for rule in self.criteria.get(skill, []):
             path, content = rule["path"], files.get(rule["path"])
             if rule["type"] == "includes":
-                label = f'{path} must include "{rule["text"]}"'
                 ok = content is not None and rule["text"] in content
                 reason = f"{path} is missing" if content is None else \
                     f'{path} does not include "{rule["text"]}"'
             else:
-                label, ok, reason = f"{path} must exist", content is not None, f"{path} is missing"
-            results.append({"rule": rule, "label": label, "ok": ok,
+                ok, reason = content is not None, f"{path} is missing"
+            results.append({"rule": rule, "label": self.label(rule), "ok": ok,
                             "reason": None if ok else reason})
         return {"ok": all(r["ok"] for r in results), "results": results,
                 "failures": [f"{r['label']}: {r['reason']}" for r in results if not r["ok"]]}
+
+    @staticmethod
+    def label(rule: dict) -> str:
+        if rule["type"] == "includes":
+            return f'{rule["path"]} must include "{rule["text"]}"'
+        return f"{rule['path']} must exist"
 
     @staticmethod
     def unpack(body) -> tuple[str | None, dict[str, str]]:
@@ -239,8 +244,9 @@ class FakeSlancha:
         skill, rest = (found.group(1), found.group(2) or "") if found else (None, "")
         record = self.proposals.get(skill)
         served = self.published.get(skill, (None, {}))
-        agent_only = ("an admin lets agent tokens start drafts and outcome jobs in Workspace "
-                      "settings")
+        agent_only = ("agent tokens cannot start drafts or outcome jobs until an admin allows it: "
+                      "\"Let agent tokens start drafts and outcome jobs\" in Workspace settings in "
+                      "the console")
         if (method, path) == ("GET", "/api/tracing/status"):
             return 200, self.tracing_status
         if (method, path) == ("GET", "/api/pending"):
@@ -301,7 +307,7 @@ class FakeSlancha:
                                            "at": 1790000000.0}] if served[0] else []}
         if (method, rest) == ("GET", "/criteria"):
             rules = self.criteria.get(skill, [])
-            return 200, {"skill": skill, "rules": rules,
+            return 200, {"skill": skill, "rules": rules, "labels": [self.label(r) for r in rules],
                          "updated_by": "boss@example.test" if rules else None,
                          "updated_at": 1790000000.0 if rules else None,
                          "served": served[0] and {"revision": served[0], **self.evaluate(
@@ -353,6 +359,8 @@ class FakeSlancha:
             revision = (body or {}).get("revision") or (record or {}).get("revision") or served[0]
             if revision is None:
                 return 404, {"detail": f"nothing of '{skill}' is stored to scan"}
+            if self.scan_error:                  # as job_service.StartFailed answers
+                return 502, {"detail": self.scan_error}
             return 202, self.start_job("scan", skill, revision)
         if path in (f"/api/draft/{skill}", f"/api/skills/{skill}/outcomes") and not self.agent_jobs:
             return 403, {"detail": agent_only}

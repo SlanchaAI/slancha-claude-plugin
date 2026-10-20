@@ -71,9 +71,13 @@ class AgentCase(unittest.TestCase):
 class TokenTests(AgentCase):
     def test_whoami(self):
         out = self.slancha("whoami")
-        self.assertIn("dev@example.test: proposer in Example Org", out)
+        self.assertIn("dev@example.test: proposer in the workspace Example Org", out)
         self.assertIn("Token: skills:read, usage:write, manage; expires ", out)
         self.assertIn("(in 30 days)", out)
+        self.assertIn("As an agent token it reads skills, reviews and jobs, checks acceptance "
+                      "criteria, uploads and scans", out)
+        self.assertIn("Approving, rejecting, rolling back and setting criteria are for people in "
+                      "the console.", out)
         doc = self.as_json("whoami")
         self.assertIn("manage", doc["capabilities"])
         self.assertIsInstance(doc["expires_at"], float)
@@ -166,6 +170,15 @@ class CriteriaAndUploadTests(AgentCase):
         self.assertIn("Acceptance criteria: 2 rules", out)
         self.assertIn(f"Served {self.v1[:12]}: meets all 2", out)
 
+    def test_criteria_of_a_skill_with_nothing_stored_lists_the_rules(self):
+        self.api.criteria["brand-new"] = list(RULES)
+        out = self.slancha("criteria", "brand-new")
+        self.assertIn("Acceptance criteria: 2 rules, set by boss@example.test", out)
+        self.assertIn('  - SKILL.md must include "## When to use"\n  - scripts/run.sh must exist',
+                      out)
+        self.assertEqual(self.as_json("criteria", "brand-new")["labels"],
+                         ['SKILL.md must include "## When to use"', "scripts/run.sh must exist"])
+
     def test_upload_that_fails_the_criteria_is_stored_and_exits_3(self):
         out = self.slancha("upload", self.package({"SKILL.md": SKILL["SKILL.md"]}), code=3)
         record = self.api.proposals["demo"]
@@ -180,14 +193,22 @@ class CriteriaAndUploadTests(AgentCase):
         self.assertIn("slancha criteria <skill> --check <path>", out)
         self.assertIn("already waiting for review", self.slancha("upload", self.package(), code=1))
 
-    def test_an_upload_whose_scan_could_not_start_says_how_to_start_it(self):
+    def test_an_upload_whose_scan_could_not_start_exits_1_and_says_not_to_upload_again(self):
         self.api.proposals.clear()
-        self.api.scan_error = "the security scan could not start (RuntimeError)"
-        out = self.slancha("upload", self.package())
-        self.assertIn("Gate: blocked\n  blocked: its security scan has not come back clean yet", out)
-        self.assertIn("Security scan: the security scan could not start (RuntimeError); slancha "
-                      "scan demo starts it again.", out)
+        self.api.scan_error = "the job could not start: RuntimeError"
+        out = self.slancha("upload", self.package(), code=1)
+        self.assertIn("Uploaded demo: revision ", out)
+        self.assertIn("Gate: blocked\n  blocked: its security scan did not start", out)
+        self.assertIn("Security scan: the job could not start: RuntimeError. The change is stored "
+                      "and waits for review, so do not upload it again: slancha scan demo --wait "
+                      "starts the scan again.", out)
         self.assertNotIn("--wait follows it", out)
+        doc = self.as_json("upload", self.package(), code=1)    # refused: a change already waits
+        self.assertEqual(doc["status"], 409)
+        out = self.slancha("scan", "demo", "--wait", code=1)
+        self.assertIn("Slancha answered HTTP 502: the job could not start: RuntimeError. That is on "
+                      "Slancha's side, not in what was sent: try again later, and tell an admin if "
+                      "it keeps failing.", out)
 
     def test_upload_json_leaves_out_what_the_server_refuses(self):
         root = Path(self.package())
@@ -322,7 +343,8 @@ class JobTests(AgentCase):
 class DraftAndOutcomesTests(AgentCase):
     def test_draft_needs_the_admin_opt_in_and_acknowledges_it(self):
         out = self.slancha("draft", "demo", code=1)
-        self.assertIn("an admin lets agent tokens start drafts and outcome jobs", out)
+        self.assertIn("agent tokens cannot start drafts or outcome jobs until an admin allows it: "
+                      "\"Let agent tokens start drafts and outcome jobs\" in Workspace settings", out)
         self.api.agent_jobs = True
         out = self.slancha("draft", "demo")
         self.assertEqual(self.sent("/api/draft/demo"),

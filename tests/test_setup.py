@@ -312,7 +312,9 @@ class InitTests(InitCase):
         self.assertIn("run slancha auth first", self.run_script("init", code=1))
         self.env["SLANCHA_TOKEN"] = TOKEN
         (self.config / "tracing.json").unlink()
-        self.assertIn("run slancha auth first", self.run_script("init", "--tracing", code=1))
+        self.assertIn("No tracing keys in ~/.config/slancha/tracing.json: run slancha auth "
+                      "--tracing first; an org admin approves it.",
+                      self.run_script("init", "--tracing", code=1))
         self.assertEqual(self.calls(), [])
 
     def test_without_tracing_only_the_slancha_plugin(self):

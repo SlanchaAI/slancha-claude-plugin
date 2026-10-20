@@ -130,7 +130,7 @@ above, and an error is `{"error": "<message>", "status": <HTTP status or null>}`
 | Code | Meaning |
 |---|---|
 | 0 | done |
-| 1 | an error or a refusal, including a job that `--wait` saw fail or be cancelled |
+| 1 | an error or a refusal, including a job that `--wait` saw fail or be cancelled, and an upload whose security scan did not start (it is stored: run `slancha scan <s> --wait`, not another upload) |
 | 2 | a usage error |
 | 3 | the acceptance criteria are not met: `criteria --check` or `--revision` failed, an upload missed them (it is stored, but cannot be approved), or the API answered 409 `acceptance criteria not met: ...` |
 

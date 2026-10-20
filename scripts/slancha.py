@@ -299,6 +299,10 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
             message = f"Slancha answered HTTP {error.code}" + (f": {detail}" if detail else ".")
             if error.code in (404, 429) and not detail:
                 message += WRONG_API.format(host=host)
+            if error.code >= 500:
+                message += ("" if message.endswith(".") else ".") + \
+                    " That is on Slancha's side, not in what was sent: try again later, and tell " \
+                    "an admin if it keeps failing."
             if error.code == 403 and detail.startswith(PLAIN_TOKEN_DETAIL):
                 message += ("" if message.endswith(".") else ".") + \
                     " This needs an agent token: run slancha auth --manage."
@@ -1319,7 +1323,7 @@ def load_tracing() -> dict:
     if not (isinstance(doc, dict) and all(isinstance(doc.get(k), str) and doc[k]
                                           for k in ("host", "public_key", "secret_key"))):
         raise SlanchaError("No tracing keys in ~/.config/slancha/tracing.json: run slancha auth "
-                           "first.")
+                           "--tracing first; an org admin approves it.")
     doc["host"] = check_url(doc["host"], "host in ~/.config/slancha/tracing.json")
     return doc
 
@@ -1920,10 +1924,15 @@ def criteria_lines(doc: dict) -> list[str]:
     lines = [f"Acceptance criteria: {len(rules)} rule{'s' if len(rules) != 1 else ''}"
              + (f", set by {printable(doc['updated_by'], 120)}" if doc.get("updated_by") else "")
              + since(doc.get("updated_at")) + "."]
+    evaluated = False
     for key, title in (("served", "Served"), ("pending", "Waiting for review")):
         evaluation = doc.get(key)
         if isinstance(evaluation, dict):
+            evaluated = True
             lines += evaluation_lines(evaluation, f"{title} {rev(evaluation.get('revision'))}")
+    if not evaluated:            # no revision to show them against: list the rules themselves
+        lines += [f"  - {printable(label)}" for label in doc.get("labels") or []
+                  if isinstance(label, str)]
     return lines
 
 
@@ -2041,12 +2050,17 @@ def whoami(cfg: Config, args):
     org = me.get("org") if isinstance(me.get("org"), dict) else {}
     caps = me.get("capabilities") if isinstance(me.get("capabilities"), list) else []
     lines = [f"{printable(me.get('email') or me.get('user') or '?', 120)}: "
-             f"{printable(me.get('role'), 40)} in "
+             f"{printable(me.get('role'), 40)} in the workspace "
              f"{printable(org.get('name') or org.get('id') or '?', 120)}",
              token_line(caps, me.get("expires_at"))]
     if "manage" not in caps:
         lines.append("This token reads published skills and reports their use, nothing more; "
                      "slancha auth --manage signs in an agent token.")
+    else:
+        lines.append("As an agent token it reads skills, reviews and jobs, checks acceptance "
+                     "criteria, uploads and scans; drafts and outcome jobs also need an admin to "
+                     "allow them. Approving, rejecting, rolling back and setting criteria are for "
+                     "people in the console.")
     return me, lines, 0
 
 
@@ -2073,7 +2087,8 @@ def skill(cfg: Config, args):
     if isinstance(pending, dict):
         lines.append(f"Waiting for review: {printable(pending.get('kind'), 20)} "
                      f"{rev(pending.get('revision'))}, proposal "
-                     f"{printable(pending.get('id'), 80)}{since(pending.get('created'))}")
+                     f"{printable(pending.get('id'), 80)}{since(pending.get('created'))}; "
+                     f"slancha pending {name} shows whether it can be approved")
     publications = [p for p in versions.get("publications") or [] if isinstance(p, dict)]
     if publications:
         lines.append("Publications, newest first:")
@@ -2099,11 +2114,14 @@ def upload(cfg: Config, args):
         f"Uploaded {printable(doc.get('skill'), 64)}: revision {rev(doc.get('revision'))}, "
         f"proposal {printable(doc.get('proposal_id'), 80)} ({printable(doc.get('kind'), 20)}). "
         "It waits for a person to review it in the console."]
-    lines += gate_lines(gate, held="its security scan has not come back clean yet"
+    scan_error = doc.get("scan_error")
+    lines += gate_lines(gate, held="its security scan did not start" if scan_error else
+                        "its security scan has not come back clean yet"
                         ) + evaluation_lines(criteria, "Acceptance criteria")
-    if doc.get("scan_error"):
-        lines.append(f"Security scan: {printable(doc['scan_error'])}; slancha scan "
-                     f"{printable(doc.get('skill'), 64)} starts it again.")
+    if scan_error:
+        lines.append(f"Security scan: {printable(scan_error)}. The change is stored and waits for "
+                     "review, so do not upload it again: slancha scan "
+                     f"{printable(doc.get('skill'), 64)} --wait starts the scan again.")
     elif doc.get("scan_job"):
         lines.append(f"Security scan: job {printable(doc['scan_job'], 80)}; slancha job "
                      f"{printable(doc['scan_job'], 80)} --wait follows it.")
@@ -2111,7 +2129,7 @@ def upload(cfg: Config, args):
         lines.append("The change is stored but cannot be approved until it meets the acceptance "
                      "criteria, and no other upload of the skill is taken until a person rejects "
                      "it. Check a package first: slancha criteria <skill> --check <path>.")
-    return doc, lines, CRITERIA_FAILED if unmet else 0
+    return doc, lines, CRITERIA_FAILED if unmet else 1 if scan_error else 0
 
 
 def review_card(cfg: Config, name: str) -> dict:
@@ -2276,7 +2294,8 @@ Also: slancha update [skill] [--dry-run] [--force] and slancha status, which /sl
 and /slancha:status run.
 
 Exit codes: 0 done, 1 an error or a refusal, 2 a usage error, 3 the acceptance criteria are not
-met, 130 stopped with Ctrl-C. --json prints the API's JSON (or the documented wrapper) on stdout;
+met, 130 stopped with Ctrl-C. An upload that exits 1 or 3 after its Uploaded line is stored:
+do not upload it again. --json prints the API's JSON (or the documented wrapper) on stdout;
 an error then prints {"error": "<message>", "status": <HTTP status or null>}.
 
 Approving, rejecting and rolling back changes, and setting acceptance criteria, are for people
@@ -2362,7 +2381,7 @@ def cli(argv: list[str]) -> int:
     def command(name: str, run, summary: str, description: str | None = None, *, named=True):
         sub = commands.add_parser(name, help=summary, description=description or summary)
         if named:
-            sub.add_argument("skill", type=skill_arg)
+            sub.add_argument("skill", type=skill_arg, help="the skill's name")
         sub.add_argument("--json", action="store_true", help="print the API's JSON")
         sub.set_defaults(run=run)
         return sub
@@ -2374,26 +2393,29 @@ def cli(argv: list[str]) -> int:
     sub = command("upload", upload, "propose a skill: a directory of text files or a .zip",
                   "Uploads a skill as a change waiting for review, and starts its security scan. "
                   "Exit 3 when it does not meet the skill's acceptance criteria: it is stored, but "
-                  "cannot be approved. Check first with slancha criteria <skill> --check <path>.",
+                  "cannot be approved. Check first with slancha criteria <skill> --check <path>. "
+                  "Exit 1 after the Uploaded line when its scan did not start: it is stored, so "
+                  "do not upload it again; slancha scan <skill> --wait starts the scan.",
                   named=False)
     sub.add_argument("path", help="the skill's directory (SKILL.md at its top) or a .zip of it")
     sub.add_argument("--name", type=skill_arg, help="the skill's name (default: SKILL.md's)")
     sub = command("pending", pending, "the changes waiting for review, or one skill's review card",
                   named=False)
-    sub.add_argument("skill", nargs="?", type=skill_arg)
+    sub.add_argument("skill", nargs="?", type=skill_arg, help="show this skill's review card")
     command("review", review, "read a waiting change: its card, evidence and every diff",
             "Shows the review card, the evidence and the diff of every changed component. It is "
             "read-only: people approve or reject changes in the Slancha console.")
     sub = command("jobs", jobs, "recent jobs: scans, drafts and outcomes", named=False)
     sub.add_argument("--skill", type=skill_arg, help="only this skill's")
     sub = command("job", job, "one job; --wait follows it to its end", named=False)
-    sub.add_argument("id")
+    sub.add_argument("id", help="the job's id, as slancha jobs lists it")
     sub.add_argument("--wait", action="store_true",
                      help="poll until it ends; exit 1 unless it succeeded")
     sub.add_argument("--cancel", action="store_true", help="cancel it first")
     sub = command("scan", scan, "start a security scan of a stored revision",
                   "Scans the revision waiting for review, else the served one, or --revision.")
-    sub.add_argument("--revision", type=revision_arg)
+    sub.add_argument("--revision", type=revision_arg,
+                     help="a stored revision: all 64 hex characters, as --json shows it")
     sub.add_argument("--wait", action="store_true",
                      help="poll until it ends; exit 1 unless it succeeded")
     sub = command("draft", draft, "draft a skill from your workspace's traced sessions",
@@ -2422,7 +2444,8 @@ def cli(argv: list[str]) -> int:
     which = sub.add_mutually_exclusive_group()
     which.add_argument("--check", metavar="PATH", help="a skill directory or .zip, packaged as "
                                                        "upload would")
-    which.add_argument("--revision", type=revision_arg, help="a stored revision of the skill")
+    which.add_argument("--revision", type=revision_arg,
+                       help="a stored revision of the skill: all 64 hex characters")
 
     args = parser.parse_args(argv)
     if args.command == "draft" and (bool(args.new) != bool(args.project)
