@@ -22,7 +22,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fake_api import TOKEN, FakeSlancha, entry, sha256, skill_zip  # noqa: E402
+from fake_api import AGENT_TOKEN, TOKEN, FakeSlancha, entry, sha256, skill_zip  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "slancha.py"
 
@@ -577,6 +577,10 @@ class UsageTests(PluginCase):
         out = self.run_script("status")
         self.assertIn(f"demo  {self.v1[:12]}  ~/.claude/skills  update available: {v2[:12]}", out)
         self.assertIn("Usage: 1 event waiting to upload.", out)
+        self.assertIn("Token: skills:read, usage:write; does not expire; role viewer.", out)
+        out = self.run_script("status", env={**self.env, "SLANCHA_TOKEN": AGENT_TOKEN})
+        self.assertIn("Token: skills:read, usage:write, manage; expires ", out)
+        self.assertIn("days); role proposer.", out)
 
 
 if __name__ == "__main__":

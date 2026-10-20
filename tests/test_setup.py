@@ -115,8 +115,30 @@ class AuthTests(SetupCase):
         self.assertNotIn("An admin", out)
         self.assertIn("Removed ~/.config/slancha/tracing.json from an earlier sign-in", out)
         self.assertIn("Next: slancha init\n", out)
+        self.assertIn("Token: skills:read, usage:write; does not expire.", out)
         self.assertFalse((self.config / "tracing.json").exists())   # from an earlier sign-in
         self.assertEqual((self.config / "token").read_text(), DEVICE_TOKEN)
+
+    def test_manage_signs_in_an_agent_token(self):
+        self.api.pending = 0
+        out = self.run_script("auth", "--no-browser", "--manage")
+        body = self.api.device_bodies[0]
+        self.assertEqual(body, {"client": body["client"], "manage": True})
+        self.assertIn("signed in to your Slancha org as a proposer, approver or admin", out)
+        self.assertIn("at most as a proposer", out)
+        self.assertIn("~/.config/slancha/token        your agent token", out)
+        self.assertIn("Token: skills:read, usage:write, manage; expires ", out)
+        self.assertIn("(in 30 days)", out)
+        self.assertIn("It replaces the token the plugin's hooks use too", out)
+        self.assertEqual((self.config / "token").read_text(), DEVICE_TOKEN)
+        self.assertEqual(mode(self.config / "token"), 0o600)
+        self.api.device_bodies.clear()
+        out = self.run_script("auth", "--no-browser", "--manage", "--tracing")
+        self.assertEqual(self.api.device_bodies[0],
+                         {"client": body["client"], "tracing": True, "manage": True})
+        self.assertIn("An admin of your Slancha org approves", out)
+        self.assertIn("Next: slancha init --tracing", out)
+        self.assertEqual(json.loads((self.config / "tracing.json").read_text()), TRACING)
 
     def test_tracing_asked_but_no_keys_sent(self):
         self.api.tracing = None
@@ -272,7 +294,8 @@ class InitTests(InitCase):
         (self.bin / "uv").unlink()
         self.assertIn("This machine has what slancha init needs: claude and git.",
                       self.run_script("init", "--check"))
-        self.assertIn("`uv` is not on PATH", self.run_script("init", "--check", "--tracing", code=1))
+        self.assertIn("`uv` is not on PATH",
+                      self.run_script("init", "--check", "--tracing", code=1))
         self.tool("uv")
         self.assertIn("This machine has what slancha init --tracing needs",
                       self.run_script("init", "--check", "--tracing"))
