@@ -300,7 +300,8 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
             if error.code in (404, 429) and not detail:
                 message += WRONG_API.format(host=host)
             if error.code == 403 and detail.startswith(PLAIN_TOKEN_DETAIL):
-                message += " This needs an agent token: run slancha auth --manage."
+                message += ("" if message.endswith(".") else ".") + \
+                    " This needs an agent token: run slancha auth --manage."
         raise ApiError(error.code, message, detail) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", None) or error.__class__.__name__
@@ -1926,11 +1927,15 @@ def criteria_lines(doc: dict) -> list[str]:
     return lines
 
 
-def gate_lines(gate) -> list[str]:
+def gate_lines(gate, held: str | None = None) -> list[str]:
+    """The gate as the console's approve button reads it: `held` says why a change the gate
+    itself would allow still cannot be approved (a stale proposal, a scan not clean yet)."""
     if not isinstance(gate, dict):
         return []
-    lines = ["Gate: " + ("can be approved" if gate.get("promotable") else "blocked")]
+    lines = ["Gate: " + ("can be approved" if gate.get("promotable") and not held else "blocked")]
     lines += [f"  blocked: {printable(b)}" for b in gate.get("blocked") or []]
+    if held:
+        lines.append(f"  blocked: {printable(held)}")
     return lines + [f"  warning: {printable(w)}" for w in gate.get("warnings") or []]
 
 
@@ -2094,12 +2099,14 @@ def upload(cfg: Config, args):
         f"Uploaded {printable(doc.get('skill'), 64)}: revision {rev(doc.get('revision'))}, "
         f"proposal {printable(doc.get('proposal_id'), 80)} ({printable(doc.get('kind'), 20)}). "
         "It waits for a person to review it in the console."]
-    lines += gate_lines(gate) + evaluation_lines(criteria, "Acceptance criteria")
-    if doc.get("scan_job"):
+    lines += gate_lines(gate, held="its security scan has not come back clean yet"
+                        ) + evaluation_lines(criteria, "Acceptance criteria")
+    if doc.get("scan_error"):
+        lines.append(f"Security scan: {printable(doc['scan_error'])}; slancha scan "
+                     f"{printable(doc.get('skill'), 64)} starts it again.")
+    elif doc.get("scan_job"):
         lines.append(f"Security scan: job {printable(doc['scan_job'], 80)}; slancha job "
                      f"{printable(doc['scan_job'], 80)} --wait follows it.")
-    if doc.get("scan_error"):
-        lines.append(f"Security scan: {printable(doc['scan_error'])}")
     if unmet:
         lines.append("The change is stored but cannot be approved until it meets the acceptance "
                      "criteria, and no other upload of the skill is taken until a person rejects "
@@ -2119,8 +2126,8 @@ def card_lines(card: dict) -> list[str]:
              f"{printable(card.get('created_by'), 120)}{since(card.get('created'))}"]
     if card.get("stale"):
         lines.append(f"Stale: {printable(card['stale'])}")
-    lines += gate_lines(card.get("gate")) + evaluation_lines(card.get("criteria"),
-                                                             "Acceptance criteria")
+    lines += gate_lines(card.get("gate"), held=card.get("stale") or card.get("scan_blocker")
+                        ) + evaluation_lines(card.get("criteria"), "Acceptance criteria")
     scan = card.get("scan")
     if isinstance(scan, dict):
         lines.append("Security scan: " + ("clean" if scan.get("ok") else "not clean")

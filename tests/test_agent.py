@@ -85,8 +85,8 @@ class TokenTests(AgentCase):
     def test_a_plain_token_is_pointed_at_auth_manage(self):
         self.assertIn("demo", self.slancha("skills", token=TOKEN))
         out = self.slancha("skill", "demo", code=1, token=TOKEN)
-        self.assertIn("HTTP 403: a token cannot do this", out)
-        self.assertIn("This needs an agent token: run slancha auth --manage.", out)
+        self.assertIn("HTTP 403: a token cannot do this; sign in to the console. This needs an "
+                      "agent token: run slancha auth --manage.", out)
         doc = self.as_json("pending", code=1, token=TOKEN)
         self.assertEqual(doc["status"], 403)
         self.assertIn("slancha auth --manage", doc["error"])
@@ -180,6 +180,15 @@ class CriteriaAndUploadTests(AgentCase):
         self.assertIn("slancha criteria <skill> --check <path>", out)
         self.assertIn("already waiting for review", self.slancha("upload", self.package(), code=1))
 
+    def test_an_upload_whose_scan_could_not_start_says_how_to_start_it(self):
+        self.api.proposals.clear()
+        self.api.scan_error = "the security scan could not start (RuntimeError)"
+        out = self.slancha("upload", self.package())
+        self.assertIn("Gate: blocked\n  blocked: its security scan has not come back clean yet", out)
+        self.assertIn("Security scan: the security scan could not start (RuntimeError); slancha "
+                      "scan demo starts it again.", out)
+        self.assertNotIn("--wait follows it", out)
+
     def test_upload_json_leaves_out_what_the_server_refuses(self):
         root = Path(self.package())
         (root / ".hidden").write_text("x")
@@ -242,6 +251,8 @@ class ReviewTests(AgentCase):
         self.assertIn(f"demo: update {self.v1[:12]} -> {self.record['revision'][:12]}", out)
         self.assertIn("Files: SKILL.md modified", out)
         self.assertIn("Security scan: no clean security scan of this revision yet", out)
+        # The gate alone would allow it; the scan that is not clean yet still blocks approval.
+        self.assertIn("Gate: blocked\n  blocked: no clean security scan of this revision yet", out)
         self.assertEqual(self.as_json("pending", "demo")["id"], self.record["id"])
         self.assertEqual([r["skill"] for r in self.as_json("pending")], ["demo"])
         self.api.criteria["demo"] = [{"type": "file", "path": "CHANGELOG"}]

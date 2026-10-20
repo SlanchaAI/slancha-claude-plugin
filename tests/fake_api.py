@@ -88,6 +88,7 @@ class FakeSlancha:
         self.requests: list[tuple[str, str, str | None]] = []
         self.redirect: str | None = None     # answer everything with a 302 to this origin
         self.expired = False                 # answer every token with 401 "this token expired"
+        self.scan_error = None               # the upload's scan could not start: this text
         self.not_slancha = False             # answer everything as a throttled AWS front would
         self.zip_for = None                  # callable(skill, revision) -> (bytes, headers)
         self.usage_status: int | None = None     # answer usage posts with this status instead
@@ -269,8 +270,9 @@ class FakeSlancha:
             scan = self.start_job("scan", name, revision)
             return 201, {"skill": name, "proposal_id": self.proposals[name]["id"],
                          "kind": self.proposals[name]["kind"], "revision": revision,
-                         "gate": self.card(name)["gate"], "scan_job": scan["id"],
-                         "scan_error": None, "criteria": self.evaluate(name, files)}
+                         "gate": self.card(name)["gate"],
+                         "scan_job": None if self.scan_error else scan["id"],
+                         "scan_error": self.scan_error, "criteria": self.evaluate(name, files)}
         if path == "/api/jobs":
             return 200, [j for j in self.jobs.values() if query.get("skill") in (None, j["skill"])]
         found = re.fullmatch(r"/api/jobs/([^/]+)(/cancel)?", path)
