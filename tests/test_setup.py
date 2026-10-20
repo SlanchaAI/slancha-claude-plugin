@@ -442,8 +442,10 @@ class TracingTests(InitCase):
 
     def test_on_needs_the_plugin(self):
         (self.home / "fake-claude.json").write_text(json.dumps({"markets": {}, "plugins": []}))
-        self.assertIn("run slancha auth --tracing, then slancha init --tracing",
-                      self.tracing("on", code=1))
+        out = self.tracing("on", code=1)
+        self.assertIn("an admin connects the workspace's Langfuse project in the console; run "
+                      "slancha auth --tracing, which an org admin approves, then slancha init "
+                      "--tracing. slancha tracing status shows what is done.", out)
         self.assertIn("not installed, so nothing is traced", self.tracing("off"))
 
     def test_config_merges_options_and_keeps_skill_tags_on(self):

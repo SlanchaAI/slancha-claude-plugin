@@ -76,8 +76,12 @@ class TokenTests(AgentCase):
         self.assertIn("(in 30 days)", out)
         self.assertIn("As an agent token it reads skills, reviews and jobs, checks acceptance "
                       "criteria, uploads and scans", out)
-        self.assertIn("Approving, rejecting, rolling back and setting criteria are for people in "
-                      "the console.", out)
+        self.assertIn("Drafts and outcome jobs: not allowed until an admin turns them on in "
+                      "Workspace settings. Approving, rejecting, rolling back and setting criteria "
+                      "are for people in the console.", out)
+        self.api.agent_jobs = True
+        self.assertIn("Drafts and outcome jobs: allowed; an admin turned them on.",
+                      self.slancha("whoami"))
         doc = self.as_json("whoami")
         self.assertIn("manage", doc["capabilities"])
         self.assertIsInstance(doc["expires_at"], float)

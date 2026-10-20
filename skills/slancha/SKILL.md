@@ -8,11 +8,12 @@ description: Work with the team's Slancha skill library from the terminal with t
 Run it as `slancha <command>`. If `slancha` is not on PATH, run
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/slancha.py" <command>` instead.
 
-Most commands need an agent token. `slancha whoami` shows the workspace, the token's role,
-capabilities and expiry, and what it can do. If `manage` is missing, or a command says "This
-needs an agent token", ask the user to run `slancha auth --manage` in their own terminal; they
-approve it in the Slancha console. An agent token expires after 30 days, and then commands say
-"Your Slancha token expired". Never read, print or handle the token yourself.
+Most commands need an agent token, whose capabilities include `manage`. `slancha whoami` shows
+the workspace, the token's role, capabilities and expiry, what it can do, and whether drafts are
+allowed. If `manage` is missing, or a command says "This needs an agent token", ask the user to
+run `slancha auth --manage` in their own terminal; they approve it in the Slancha console. An
+agent token expires after 30 days, and then commands say "Your Slancha token expired". Never
+read, print or handle the token yourself.
 
 ## Commands
 
@@ -37,13 +38,15 @@ approve it in the Slancha console. An agent token expires after 30 days, and the
 | `slancha tracing config [--max-chars N] [--images on\|off]` | show or set what a trace captures |
 
 A `--revision` takes all 64 hex characters, as `--json` shows them; the text output shortens
-revisions to 12.
+revisions to 12. `slancha auth`, `init`, `uninstall`, `update` and `status` set up this machine
+and its installed skills; the user runs them.
 
 Every command takes `--json`. Stdout then holds only JSON: the API's answer, or
 `{"versions", "criteria"}` for `skill` and `{"card", "evidence", "diffs"}` for `review`. An error
 is `{"error": "<message>", "status": <HTTP status or null>}`. In `skills --json`, each row has
-`name`, `revision` (the served one, `""` when none), `pending` (true while a change waits for
-review), `pending_kind`, `uses_7d` and `scan`.
+`name`, `description`, `active` (true while it is served), `revision` (the served one, `""` when
+none), `pending` (true while a change waits for review), `pending_kind`, `updated_at`, `uses_7d`
+and `scan`.
 
 Exit codes: 0 done; 1 an error or a refusal (the message says why); 2 a usage error; 3 the
 acceptance criteria are not met. `job --wait` and `scan --wait` exit 1 unless the job succeeded.

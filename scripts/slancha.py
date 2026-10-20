@@ -1794,8 +1794,11 @@ def tracing_switch(cfg: Config, args):
         if not on:
             return ({"tracing": "off", "changed": False, "installed": False},
                     ["The Langfuse plugin is not installed, so nothing is traced."], 0)
-        raise SlanchaError("The Langfuse plugin is not installed: run slancha auth --tracing, then "
-                           "slancha init --tracing.")
+        raise SlanchaError("The Langfuse plugin is not installed. Setting tracing up takes, in "
+                           "order: an admin connects the workspace's Langfuse project in the "
+                           "console; run slancha auth --tracing, which an org admin approves, "
+                           "then slancha init --tracing. slancha tracing status shows what is "
+                           "done.")
     scope = "local" if args.project else "user"
     where = (f"in this project ({shown(Path.cwd() / '.claude' / 'settings.local.json')}, not "
              "committed)" if args.project
@@ -2057,10 +2060,13 @@ def whoami(cfg: Config, args):
         lines.append("This token reads published skills and reports their use, nothing more; "
                      "slancha auth --manage signs in an agent token.")
     else:
+        allowed = api_object(cfg, "GET", "/api/agent-jobs").get("enabled") is True
         lines.append("As an agent token it reads skills, reviews and jobs, checks acceptance "
-                     "criteria, uploads and scans; drafts and outcome jobs also need an admin to "
-                     "allow them. Approving, rejecting, rolling back and setting criteria are for "
-                     "people in the console.")
+                     "criteria, uploads and scans. Drafts and outcome jobs: "
+                     + ("allowed; an admin turned them on." if allowed else
+                        "not allowed until an admin turns them on in Workspace settings.")
+                     + " Approving, rejecting, rolling back and setting criteria are for people "
+                     "in the console.")
     return me, lines, 0
 
 
@@ -2424,8 +2430,9 @@ def cli(argv: list[str]) -> int:
                   "change for a person to review. An admin must first let agent tokens start "
                   "drafts and outcome jobs (Workspace settings in the console); that opt-in is the "
                   "consent "
-                  f"this command sends as acknowledge: {DRAFT_NOTICE}. Without --new it improves "
-                  "a served skill from the sessions that used it.")
+                  f"this command sends as acknowledge: {DRAFT_NOTICE}. An agent asks the user "
+                  "before running it. Without --new it improves a served skill with no change "
+                  "waiting, from the sessions that used it.")
     sub.add_argument("--new", action="store_true", help="write a new skill (needs --project)")
     sub.add_argument("--project", metavar="P",
                      help="with --new: the project directory whose sessions it is written from "

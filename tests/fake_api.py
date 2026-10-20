@@ -7,6 +7,7 @@
 - POST /api/cli/device, /api/cli/token the device authorization grant (no token)
 
 - GET  /api/me                         role, capabilities and expires_at (an agent token's)
+- GET  /api/agent-jobs                 {enabled}: whether an admin lets agent tokens start drafts
 
 and, for an agent token only (the plain token gets 403, as from the server), FakeSlancha.answer:
 
@@ -247,6 +248,8 @@ class FakeSlancha:
         agent_only = ("agent tokens cannot start drafts or outcome jobs until an admin allows it: "
                       "\"Let agent tokens start drafts and outcome jobs\" in Workspace settings in "
                       "the console")
+        if (method, path) == ("GET", "/api/agent-jobs"):
+            return 200, {"enabled": self.agent_jobs}
         if (method, path) == ("GET", "/api/tracing/status"):
             return 200, self.tracing_status
         if (method, path) == ("GET", "/api/pending"):
