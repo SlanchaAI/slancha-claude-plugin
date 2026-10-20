@@ -17,7 +17,7 @@ from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
-from fake_api import DEVICE_TOKEN, TOKEN, TRACING, FakeSlancha  # noqa: E402
+from fake_api import AGENT_TOKEN, DEVICE_TOKEN, TOKEN, TRACING, FakeSlancha  # noqa: E402
 
 SCRIPT = TESTS.parent / "scripts" / "slancha.py"
 LANGFUSE = "langfuse-observability@langfuse-observability"
@@ -55,13 +55,16 @@ class AuthTests(SetupCase):
     def test_pending_then_approved(self):
         self.config.mkdir(parents=True)
         (self.config / "config.json").write_text('{"keep": 1}')
-        out = self.run_script("auth", "--no-browser")
+        out = self.run_script("auth", "--no-browser", "--tracing")
         self.assertIn("WDJB-MJHT", out)
         self.assertIn(f"{self.api.url}/cli?code=WDJB-MJHT", out)
         self.assertIn("An admin of your Slancha org approves", out)
         self.assertIn("Approved for org org-1.", out)
+        self.assertIn("Next: slancha init --tracing", out)
         self.assertEqual(self.api.polls, 2)                      # one pending, then approved
         self.assertTrue(self.api.device_bodies[0]["client"].startswith("slancha CLI on "))
+        self.assertEqual(set(self.api.device_bodies[0]), {"client", "tracing"})
+        self.assertIs(self.api.device_bodies[0]["tracing"], True)
         self.assertEqual(self.api.device_bodies[1], {"device_code": "device-code-1"})
         self.assertTrue(all(auth is None for _, _, auth in self.api.requests))
 
@@ -102,15 +105,35 @@ class AuthTests(SetupCase):
         self.assertIn("run slancha auth again", out)
         self.assertFalse((self.config / "token").exists())
 
-    def test_no_tracing_keys(self):
+    def test_skills_only_sign_in_asks_for_no_tracing(self):
         self.config.mkdir(parents=True)
         (self.config / "tracing.json").write_text(json.dumps(TRACING))
-        self.api.tracing = None
         self.api.pending = 0
         out = self.run_script("auth", "--no-browser")
-        self.assertIn("sent no tracing keys", out)
+        self.assertEqual(self.api.device_bodies[0], {"client": self.api.device_bodies[0]["client"]})
+        self.assertIn("Approve this request on that page, signed in to your Slancha org", out)
+        self.assertNotIn("An admin", out)
+        self.assertIn("Removed ~/.config/slancha/tracing.json from an earlier sign-in", out)
+        self.assertIn("Next: slancha init\n", out)
         self.assertFalse((self.config / "tracing.json").exists())   # from an earlier sign-in
         self.assertEqual((self.config / "token").read_text(), DEVICE_TOKEN)
+
+    def test_tracing_asked_but_no_keys_sent(self):
+        self.api.tracing = None
+        self.api.pending = 0
+        out = self.run_script("auth", "--no-browser", "--tracing")
+        self.assertIn("Slancha sent no tracing keys", out)
+        self.assertIn("slancha auth --tracing again", out)
+        self.assertEqual((self.config / "token").read_text(), DEVICE_TOKEN)
+        self.assertFalse((self.config / "tracing.json").exists())
+
+    def test_sign_in_clears_the_expired_notice(self):
+        cache = self.home / ".cache" / "slancha"
+        cache.mkdir(parents=True)
+        (cache / "token-expired").touch()
+        self.api.pending = 0
+        self.run_script("auth", "--no-browser")
+        self.assertFalse((cache / "token-expired").exists())
 
     def test_ctrl_c_stops_cleanly(self):
         self.api.outcome = "pending"
@@ -171,7 +194,7 @@ class InitCase(SetupCase):
 
 class InitTests(InitCase):
     def test_configures_claude_code_and_is_idempotent(self):
-        out = self.run_script("init")
+        out = self.run_script("init", "--tracing")
         repo = str(self.home / ".local" / "share" / "slancha" / "langfuse-observability")
         self.assertEqual(self.changing(), [
             ["git", "clone", "--quiet", "https://github.com/langfuse/claude-observability-plugin",
@@ -201,14 +224,14 @@ class InitTests(InitCase):
 
         (self.home / "tools.log").unlink()
         before = self.settings.read_bytes()
-        out = self.run_script("init")
+        out = self.run_script("init", "--tracing")
         self.assertEqual(self.changing(), [])
         self.assertEqual(self.settings.read_bytes(), before)
         self.assertIn("already configured", out)
 
     def test_dry_run_changes_nothing(self):
         before = self.settings.read_bytes()
-        out = self.run_script("init", "--dry-run")
+        out = self.run_script("init", "--dry-run", "--tracing")
         self.assertEqual(self.changing(), [])
         self.assertEqual(self.settings.read_bytes(), before)
         self.assertEqual(mode(self.settings), 0o644)
@@ -221,7 +244,7 @@ class InitTests(InitCase):
     def test_claude_config_dir(self):
         alt = self.home / "alt-claude"
         self.env["CLAUDE_CONFIG_DIR"] = str(alt)
-        self.run_script("init")
+        self.run_script("init", "--tracing")
         settings = json.loads((alt / "settings.json").read_text())
         self.assertEqual(settings["env"]["CC_LANGFUSE_BASE_URL"], TRACING["host"])
         self.assertEqual(mode(alt / "settings.json"), 0o600)
@@ -230,19 +253,29 @@ class InitTests(InitCase):
     def test_missing_prerequisites(self):
         for name in ("claude", "git", "uv"):
             (self.bin / name).unlink()
-        out = self.run_script("init", code=1)
+        out = self.run_script("init", "--tracing", code=1)
         for tool in ("`claude`", "`git`", "`uv`"):
             self.assertIn(f"{tool} is not on PATH", out)
         self.tool("uv")
         self.env["FAKE_UV_NO_PYTHON"] = "1"
-        out = self.run_script("init", code=1)
+        out = self.run_script("init", "--tracing", code=1)
         self.assertIn("uv python install 3.12", out)
         self.assertNotIn("`uv` is not on PATH", out)
+        (self.bin / "uv").unlink()
+        self.tool("claude")
+        self.tool("git")
+        self.run_script("init")                      # uv only runs the Langfuse hook
 
     def test_check_needs_no_sign_in_and_changes_nothing(self):
         del self.env["SLANCHA_TOKEN"]
         (self.config / "tracing.json").unlink()
-        self.assertIn("This machine has what slancha init needs", self.run_script("init", "--check"))
+        (self.bin / "uv").unlink()
+        self.assertIn("This machine has what slancha init needs: claude and git.",
+                      self.run_script("init", "--check"))
+        self.assertIn("`uv` is not on PATH", self.run_script("init", "--check", "--tracing", code=1))
+        self.tool("uv")
+        self.assertIn("This machine has what slancha init --tracing needs",
+                      self.run_script("init", "--check", "--tracing"))
         (self.bin / "git").unlink()
         out = self.run_script("init", "--check", code=1)
         self.assertIn("Slancha needs, on this machine:", out)
@@ -256,12 +289,34 @@ class InitTests(InitCase):
         self.assertIn("run slancha auth first", self.run_script("init", code=1))
         self.env["SLANCHA_TOKEN"] = TOKEN
         (self.config / "tracing.json").unlink()
-        self.assertIn("run slancha auth first", self.run_script("init", code=1))
+        self.assertIn("run slancha auth first", self.run_script("init", "--tracing", code=1))
         self.assertEqual(self.calls(), [])
+
+    def test_without_tracing_only_the_slancha_plugin(self):
+        # a skills-only sign-in: a token, no tracing keys, and no uv on this machine
+        (self.config / "tracing.json").unlink()
+        (self.bin / "uv").unlink()
+        before = self.settings.read_bytes()
+        out = self.run_script("init")
+        self.assertEqual(self.changing(), [
+            ["claude", "plugin", "marketplace", "add", "SlanchaAI/slancha-claude-plugin"],
+            ["claude", "plugin", "install", "slancha@slancha", "--scope", "user"]])
+        self.assertFalse([c for c in self.calls() if c[:1] in (["git"], ["uv"])])
+        self.assertFalse((self.home / ".local").exists())               # no Langfuse clone
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual({k: v for k, v in settings.items() if k != "enabledPlugins"},
+                         json.loads(before))                           # tracing left alone
+        self.assertEqual(settings["enabledPlugins"], {"slancha@slancha": True})
+        self.assertIn("Done: the Slancha plugin.", out)
+        self.assertIn("slancha auth --tracing, then slancha init --tracing", out)
+        self.assertNotIn("Langfuse", out)
+        out = self.run_script("init", "--dry-run")
+        self.assertIn("  slancha@slancha is installed", out)
+        self.assertIn("run slancha init without --dry-run", out)
 
     def test_checkout_that_misses_the_pin_fails(self):
         self.env["FAKE_GIT_BAD_CHECKOUT"] = "1"
-        out = self.run_script("init", code=1)
+        out = self.run_script("init", "--tracing", code=1)
         self.assertIn(f"is not at {PIN}", out)
         self.assertNotIn(["claude", "plugin", "install", LANGFUSE, "--scope", "user"],
                          self.calls())
@@ -269,14 +324,14 @@ class InitTests(InitCase):
     def test_unpinned_langfuse_marketplace_is_refused(self):
         (self.home / "fake-claude.json").write_text(json.dumps({
             "markets": {"langfuse-observability": "/elsewhere"}, "plugins": [LANGFUSE]}))
-        out = self.run_script("init", code=1)
+        out = self.run_script("init", "--tracing", code=1)
         self.assertIn("claude plugin marketplace remove langfuse-observability", out)
 
     def test_manual_langfuse_hook_is_reported_not_added(self):
         hooks = {"Stop": [{"hooks": [{"type": "command",
                                       "command": "uv run ~/langfuse_hook.py"}]}]}
         self.settings.write_text(json.dumps({"hooks": hooks}))
-        out = self.run_script("init")
+        out = self.run_script("init", "--tracing")
         self.assertIn("hook that runs Langfuse", out)
         self.assertEqual(json.loads(self.settings.read_text())["hooks"], hooks)
 
@@ -288,10 +343,120 @@ class InitTests(InitCase):
         self.assertIn(f'\nLANGFUSE_COMMIT = "{PIN}"', text)
 
 
+class TracingTests(InitCase):
+    """slancha tracing: the machine's side of it after init --tracing, and the workspace's."""
+    def setUp(self):
+        super().setUp()
+        self.run_script("init", "--tracing")
+        (self.home / "tools.log").unlink()
+
+    def tracing(self, *args, code: int = 0, cwd=None) -> str:
+        result = subprocess.run([sys.executable, str(SCRIPT), "tracing", *args], text=True,
+                                stdin=subprocess.DEVNULL, capture_output=True, env=self.env,
+                                cwd=cwd or self.home, timeout=60)
+        out = result.stdout + result.stderr
+        self.assertEqual(result.returncode, code, out)
+        for secret in (TOKEN, AGENT_TOKEN, TRACING["secret_key"]):
+            self.assertNotIn(secret, out)
+        return result.stdout
+
+    def test_status_shows_the_machine_and_needs_an_agent_token_for_the_workspace(self):
+        out = self.tracing("status")
+        self.assertIn("Langfuse plugin: enabled, installed for scope user", out)
+        self.assertIn(f"at the pinned commit {PIN[:8]}", out)
+        self.assertIn(f"traces go to {TRACING['host']}, keys set", out)
+        self.assertIn('CC_LANGFUSE_SKILL_TAGS=true', out)
+        self.assertIn("This needs an agent token: run slancha auth --manage.", out)
+        doc = json.loads(self.tracing("status", "--json"))
+        self.assertEqual(doc["local"]["plugin"]["installed"], True)
+        self.assertEqual(doc["local"]["clone"]["head"], PIN)
+        self.assertEqual(doc["local"]["settings"]["host"], TRACING["host"])
+        self.assertIsNone(doc["workspace"])
+        self.assertIn("HTTP 403", doc["workspace_error"])
+
+    def test_status_with_an_agent_token(self):
+        self.env["SLANCHA_TOKEN"] = AGENT_TOKEN
+        out = self.tracing("status")
+        self.assertIn("Tracing is not connected: an admin connects", out)
+        self.api.tracing_status = {"configured": True, "reachable": True, "connected": True,
+                                   "host": TRACING["host"], "since": 1790000000.0,
+                                   "traces": 42, "skills": {"demo": 7, "other": 0}}
+        out = self.tracing("status")
+        self.assertIn("42 traces since 2026-09-21", out)
+        self.assertIn("per skill: demo 7, other 0", out)
+        doc = json.loads(self.tracing("status", "--json"))
+        self.assertEqual(doc["workspace"]["traces"], 42)
+        self.assertIsNone(doc["workspace_error"])
+
+    def test_status_without_claude_or_a_token(self):
+        (self.bin / "claude").unlink()
+        del self.env["SLANCHA_TOKEN"]
+        out = self.tracing("status")
+        self.assertIn("Langfuse plugin: unknown (`claude` is not on PATH)", out)
+        self.assertIn("No Slancha token yet", out)
+
+    def test_off_and_on_for_the_user_and_for_one_project(self):
+        out = self.tracing("off")
+        self.assertIn("Tracing is now off for your user (~/.claude/settings.json).", out)
+        self.assertIs(json.loads(self.settings.read_text())["enabledPlugins"][LANGFUSE], False)
+        self.assertEqual(mode(self.settings), 0o600)
+        self.assertIn("was already off", self.tracing("off"))
+        self.assertEqual(json.loads(self.tracing("on", "--json")),
+                         {"tracing": "on", "scope": "user", "changed": True, "enabled": True,
+                          "notes": []})
+        project = self.home / "work"
+        project.mkdir()
+        out = self.tracing("off", "--project", cwd=project)
+        self.assertIn("off in this project (~/work/.claude/settings.local.json, not committed)",
+                      out)
+        local = json.loads((project / ".claude" / "settings.local.json").read_text())
+        self.assertIs(local["enabledPlugins"][LANGFUSE], False)
+        self.assertIs(json.loads(self.settings.read_text())["enabledPlugins"][LANGFUSE], True)
+        self.assertIn([LANGFUSE, "--scope", "local", "--json"],
+                      [c[3:] for c in self.calls() if c[1:3] == ["plugin", "disable"]])
+
+    def test_on_needs_the_plugin(self):
+        (self.home / "fake-claude.json").write_text(json.dumps({"markets": {}, "plugins": []}))
+        self.assertIn("run slancha auth --tracing, then slancha init --tracing",
+                      self.tracing("on", code=1))
+        self.assertIn("not installed, so nothing is traced", self.tracing("off"))
+
+    def test_config_merges_options_and_keeps_skill_tags_on(self):
+        self.assertIn("CC_LANGFUSE_MAX_CHARS = 5", self.tracing("config"))
+        settings = json.loads(self.settings.read_text())
+        settings["pluginConfigs"][LANGFUSE]["options"]["CC_LANGFUSE_SKILL_TAGS"] = False
+        self.settings.write_text(json.dumps(settings))
+        self.settings.chmod(0o644)
+        self.assertIn("skill tags are off", self.tracing("config"))
+        out = self.tracing("config", "--max-chars", "4000", "--images", "on")
+        self.assertIn("Skill tags were off and are on again", out)
+        self.assertIn("mode 0600", out)
+        after = json.loads(self.settings.read_text())
+        self.assertEqual(after["pluginConfigs"][LANGFUSE]["options"],
+                         {"CC_LANGFUSE_MAX_CHARS": 4000, "CC_LANGFUSE_SKILL_TAGS": True,
+                          "CC_LANGFUSE_CAPTURE_IMAGES": True})
+        self.assertEqual(after["pluginConfigs"]["other@market"], {"options": {"a": 1}})
+        self.assertEqual(after["env"]["CC_LANGFUSE_SECRET_KEY"], TRACING["secret_key"])
+        self.assertEqual(after["model"], "opus")
+        self.assertEqual(mode(self.settings), 0o600)
+        doc = json.loads(self.tracing("config", "--images", "on", "--json"))
+        self.assertEqual(doc["changed"], [])
+        self.assertIn("Already set", self.tracing("config", "--images", "on"))
+        for bad in (["--max-chars", "0"], ["--images", "maybe"], ["--skill-tags", "off"]):
+            self.tracing("config", *bad, code=2)
+
+    def test_config_creates_settings(self):
+        self.settings.unlink()
+        self.tracing("config", "--images", "off")
+        self.assertEqual(json.loads(self.settings.read_text()), {"pluginConfigs": {LANGFUSE: {
+            "options": {"CC_LANGFUSE_CAPTURE_IMAGES": False, "CC_LANGFUSE_SKILL_TAGS": True}}}})
+        self.assertEqual(mode(self.settings), 0o600)
+
+
 class UninstallTests(InitCase):
     def installed(self) -> dict:
         """A machine after install.sh: init has run, and auth's files and the CLI are in place."""
-        self.run_script("init")
+        self.run_script("init", "--tracing")
         (self.config / "token").write_text(TOKEN)
         (self.config / "config.json").write_text('{"api_url": "https://api.example.test"}')
         share = self.home / ".local" / "share" / "slancha"

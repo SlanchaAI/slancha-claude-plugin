@@ -2,7 +2,9 @@
 
 Each fake appends its argv to $HOME/tools.log as a JSON line. `claude` keeps its marketplaces and
 plugins in $HOME/fake-claude.json and, like the real one, writes enabledPlugins into
-settings.json when it installs a plugin. Knobs, all environment variables:
+settings.json when it installs a plugin, and `plugin enable|disable --scope user|local --json`
+into settings.json or the current directory's .claude/settings.local.json. Knobs, all
+environment variables:
 
 - FAKE_GIT_BAD_CHECKOUT=1   git checkout leaves HEAD on another commit
 - FAKE_UV_NO_PYTHON=1       `uv python find` finds nothing
@@ -23,10 +25,33 @@ def settings_path() -> Path:
     return (Path(base) if base else HOME / ".claude") / "settings.json"
 
 
+def enabled_in(path: Path) -> dict:
+    return json.loads(path.read_text()).get("enabledPlugins", {}) if path.exists() else {}
+
+
 def claude(args: list[str]) -> int:
     state = json.loads(STATE.read_text()) if STATE.exists() else {"markets": {}, "plugins": []}
+    local = Path.cwd() / ".claude" / "settings.local.json"
     if args == ["plugin", "list", "--json"]:
-        print(json.dumps([{"id": p, "scope": "user", "enabled": True} for p in state["plugins"]]))
+        # the project's local setting wins over the user's, as in Claude Code
+        user = enabled_in(settings_path())
+        print(json.dumps([{"id": p, "scope": "user",
+                           "enabled": enabled_in(local).get(p, user.get(p, True))}
+                          for p in state["plugins"]]))
+    elif args[:2] in (["plugin", "enable"], ["plugin", "disable"]) \
+            and args[3:5] in (["--scope", "user"], ["--scope", "local"]) and args[5:] == ["--json"]:
+        # --json prints one result line; "already" in that state is exit 1, as in Claude Code
+        on, path = args[1] == "enable", settings_path() if args[4] == "user" else local
+        user = enabled_in(settings_path()).get(args[2], True)
+        if args[2] not in state["plugins"] or enabled_in(path).get(args[2], user) == on:
+            print(json.dumps({"command": args[1], "outcome": "failed", "plugin": args[2],
+                              "alreadyInGoalState": args[2] in state["plugins"]}))
+            return 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        settings = json.loads(path.read_text()) if path.exists() else {}
+        settings.setdefault("enabledPlugins", {})[args[2]] = on
+        path.write_text(json.dumps(settings, indent=2))
+        print(json.dumps({"command": args[1], "outcome": "succeeded", "plugin": args[2]}))
     elif args == ["plugin", "marketplace", "list", "--json"]:
         print(json.dumps([{"name": n, "source": "directory", "path": p}
                           for n, p in state["markets"].items()]))

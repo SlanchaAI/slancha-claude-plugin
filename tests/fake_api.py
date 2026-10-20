@@ -6,6 +6,10 @@
 - POST /api/usage/skills               {events: [...]}, 1-500 per call, idempotent by id
 - POST /api/cli/device, /api/cli/token the device authorization grant (no token)
 
+and, for an agent token only (the plain token gets 403, as from the server):
+
+- GET  /api/tracing/status             the workspace's Langfuse: configured, traces, per skill
+
 Standard library only; runs in a thread on 127.0.0.1.
 """
 from __future__ import annotations
@@ -22,6 +26,8 @@ from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "slancha_pat_test-token-1"       # short on purpose: not shaped like a real token
 DEVICE_TOKEN = "slancha_pat_device-token-2"
+AGENT_TOKEN = "slancha_pat_agent-token-3"  # capability "manage" (slancha auth --manage)
+PLAIN_ONLY = "a token cannot do this; sign in to the console"
 # What https://api.slancha.ai answered every request with on 2026-09-30: an AWS throttle, no detail.
 NOT_SLANCHA = {"Reason": "ReservedFunctionConcurrentInvocationLimitExceeded", "Type": "User",
                "message": "Rate Exceeded."}
@@ -83,6 +89,9 @@ class FakeSlancha:
         self.expires_in = 600
         self.polls = 0
         self.tracing: dict | None = dict(TRACING)
+        self.tracing_status: dict = {"configured": False, "reachable": False, "connected": False,
+                                     "requested_at": None, "checked_at": 1790000000.0,
+                                     "cached": False}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -157,7 +166,11 @@ def _handler(fake: FakeSlancha):
             self.send(status, json.dumps(doc).encode())
 
         def admitted(self) -> bool:
+            """The plain token for the plugin's own routes; the agent token for every route."""
             fake.requests.append((self.command, self.path, self.headers.get("Authorization")))
+            path = urlsplit(self.path).path
+            plain = path in ("/api/skills", "/api/me", "/api/usage/skills") \
+                or re.fullmatch(r"/api/skills/[^/]+/download", path)
             if fake.not_slancha:
                 self.send_json(429, NOT_SLANCHA)
                 return False
@@ -167,10 +180,14 @@ def _handler(fake: FakeSlancha):
             if fake.expired:
                 self.send_json(401, {"detail": "this token expired; run slancha auth again"})
                 return False
-            if self.headers.get("Authorization") != f"Bearer {fake.token}":
+            auth = self.headers.get("Authorization")
+            if auth == f"Bearer {AGENT_TOKEN}" or (plain and auth == f"Bearer {fake.token}"):
+                return True
+            if auth == f"Bearer {fake.token}":
+                self.send_json(403, {"detail": PLAIN_ONLY})
+            else:
                 self.send_json(401, {"detail": "unknown personal token"})
-                return False
-            return True
+            return False
 
         def do_GET(self):
             if not self.admitted():
@@ -178,6 +195,8 @@ def _handler(fake: FakeSlancha):
             url = urlsplit(self.path)
             if url.path == "/api/skills":
                 return self.send_json(200, fake.library())
+            if url.path == "/api/tracing/status":
+                return self.send_json(200, fake.tracing_status)
             found = re.fullmatch(r"/api/skills/([^/]+)/download", url.path)
             if not found or found.group(1) not in fake.published:
                 return self.send_json(404, {"detail": "not served"})
@@ -213,8 +232,10 @@ def _handler(fake: FakeSlancha):
                 return self.send_json(400, {"error": "expired_token"})
             if fake.outcome == "pending" or fake.polls <= fake.pending:
                 return self.send_json(400, {"error": "authorization_pending"})
+            asked = fake.device_bodies[0]           # what /api/cli/device was sent
             self.send(200, json.dumps({"token": DEVICE_TOKEN, "org_id": "org-1", "api": fake.url,
-                                       "tracing": fake.tracing}).encode(),
+                                       "tracing": fake.tracing if asked.get("tracing") else None
+                                       }).encode(),
                       {"Cache-Control": "no-store"})
 
         def do_POST(self):

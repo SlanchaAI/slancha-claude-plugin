@@ -9,10 +9,11 @@ Standard library only, Python 3.9 or newer. The plugin's commands and hooks run 
     slancha.py hook     a Claude Code hook; the event arrives as JSON on stdin
     slancha.py flush    uploads the usage spool; the hooks start it in the background
 
-From a terminal, to set up a machine (install.sh runs both):
+From a terminal, to set up a machine (install.sh runs both, without --tracing):
 
-    slancha.py auth [--api URL] [--no-browser]   sign in; an org admin approves the code
-    slancha.py init [--dry-run]                  configure Claude Code: plugins and tracing
+    slancha.py auth [--api URL] [--no-browser] [--tracing]   sign in; you approve the code
+    slancha.py init [--dry-run] [--tracing]   configure Claude Code: the plugin, and tracing
+    slancha.py tracing status|on|off|config   this machine's tracing to the org's Langfuse
 
 The token is a personal token from the Slancha console, read from SLANCHA_TOKEN or from
 ~/.config/slancha/token. It goes only to the configured API origin, only over HTTPS, and is never
@@ -298,6 +299,17 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", None) or error.__class__.__name__
         raise Offline(f"Cannot reach {host} ({reason}).") from None
+
+
+def api_json(cfg: Config, method: str, path: str, *, body=None, timeout: float = 30):
+    """The parsed JSON of an API answer; raises like request(), and with the token's problem."""
+    if cfg.problem:
+        raise SlanchaError(cfg.problem)
+    _, payload = request(cfg, method, path, body=body, timeout=timeout)
+    try:
+        return json.loads(payload)
+    except ValueError:
+        raise SlanchaError(f"Slancha answered {path.split('?')[0]} with invalid JSON.") from None
 
 
 def fetch_library(cfg: Config, timeout: float = 20) -> dict[str, dict]:
@@ -1073,9 +1085,10 @@ def write_private(path: Path, text: str) -> None:
         raise
 
 
-def start_device(api: str) -> dict:
+def start_device(api: str, tracing: bool) -> dict:
     client = f"slancha CLI on {socket.gethostname().split('.')[0] or 'an unnamed host'}"
-    status, doc = post_public(api, "/api/cli/device", {"client": client})
+    body = {"client": client, **({"tracing": True} if tracing else {})}
+    status, doc = post_public(api, "/api/cli/device", body)
     if status != 200:
         raise ApiError(status, answered(status, doc, api))
     uri = doc.get("verification_uri_complete")
@@ -1137,17 +1150,20 @@ def wait_for_approval(api: str, device_code: str, expires_in: int, interval: int
     raise SlanchaError(EXPIRED)
 
 
-def auth(api_arg: str | None, browser: bool) -> None:
+def auth(api_arg: str | None, browser: bool, tracing_wanted: bool) -> None:
     api = check_url(api_arg, "--api") if api_arg else api_base()
     settings = read_config_json()        # checked now: a broken file must not cost an approval
-    device = start_device(api)
+    device = start_device(api, tracing_wanted)
     uri = printable(device["verification_uri_complete"], 1000)
     minutes = max(1, device["expires_in"] // 60)
+    who = ("An admin of your Slancha org approves this request on that page, because it asks for "
+           "the org's tracing keys" if tracing_wanted else
+           "Approve this request on that page, signed in to your Slancha org: the token is yours")
     say(f"Signing in to Slancha at {api}.", "",
         f"  Your code:  {printable(device['user_code'], 40)}",
         f"  Approve at: {uri}", "",
-        "An admin of your Slancha org approves this request on that page (check that it shows the "
-        "same code).", f"Waiting up to {minutes} min for the approval; Ctrl-C stops.")
+        f"{who} (check that it shows the same code).",
+        f"Waiting up to {minutes} min for the approval; Ctrl-C stops.")
     if browser:
         open_browser(device["verification_uri_complete"])
     doc = wait_for_approval(api, device["device_code"], device["expires_in"],
@@ -1180,6 +1196,8 @@ def auth(api_arg: str | None, browser: bool) -> None:
             stale = True
     finally:
         os.umask(old)
+    with contextlib.suppress(OSError):
+        (cache_dir() / "token-expired").unlink()       # about the token just replaced
 
     org = doc.get("org_id")
     lines = ["", "Approved" + (f" for org {printable(org, 80)}." if isinstance(org, str) else "."),
@@ -1188,11 +1206,14 @@ def auth(api_arg: str | None, browser: bool) -> None:
              f"  ~/.config/slancha/config.json  api_url {api}"]
     if tracing is not None:
         lines += [f"  ~/.config/slancha/tracing.json your org's tracing keys ({tracing['host']})",
-                  "Next: slancha init"]
+                  "Next: slancha init --tracing"]
     else:
-        lines += [("Removed ~/.config/slancha/tracing.json from an earlier sign-in. " if stale
-                   else "") + "Your org sent no tracing keys, and slancha init needs them: ask an "
-                  "org admin to set up tracing in the console, then run slancha auth again."]
+        if stale:
+            lines.append("Removed ~/.config/slancha/tracing.json from an earlier sign-in (tracing "
+                         "already set up in Claude Code stays as it is).")
+        lines.append("Slancha sent no tracing keys: ask an org admin to connect tracing in the "
+                     "console, then run slancha auth --tracing again." if tracing_wanted
+                     else "Next: slancha init")
     if os.environ.get("SLANCHA_TOKEN"):
         lines.append("Note: SLANCHA_TOKEN is set in this shell and takes precedence over the "
                      "saved token; unset it to use the new one.")
@@ -1227,22 +1248,28 @@ def run(cmd: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
         raise SlanchaError(f"`{shlex.join(cmd)}` did not run: {exc}") from None
 
 
+def failed(cmd: list[str], result: subprocess.CompletedProcess) -> SlanchaError:
+    tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+    return SlanchaError(f"`{shlex.join(cmd)}` failed (exit {result.returncode})"
+                        + (": " + " / ".join(printable(t) for t in tail) if tail else "."))
+
+
 def must(cmd: list[str]) -> str:
     result = run(cmd)
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
-        raise SlanchaError(f"`{shlex.join(cmd)}` failed (exit {result.returncode})"
-                           + (": " + " / ".join(printable(t) for t in tail) if tail else "."))
+        raise failed(cmd, result)
     return result.stdout
 
 
-def prerequisites() -> list[str]:
+def prerequisites(tracing: bool) -> list[str]:
+    """What is missing for init; uv and its Python only matter to the Langfuse hook."""
     missing = []
-    for tool, what in (("claude", "Claude Code"), ("git", "git"),
-                       ("uv", "uv (https://docs.astral.sh/uv/), which runs the Langfuse hook")):
+    tools = [("claude", "Claude Code"), ("git", "git")] + (
+        [("uv", "uv (https://docs.astral.sh/uv/), which runs the Langfuse hook")] if tracing else [])
+    for tool, what in tools:
         if shutil.which(tool) is None:
             missing.append(f"`{tool}` is not on PATH: install {what}.")
-    if shutil.which("uv") and run(["uv", "python", "find", ">=3.10"]).returncode != 0:
+    if tracing and shutil.which("uv") and run(["uv", "python", "find", ">=3.10"]).returncode != 0:
         missing.append("uv finds no Python 3.10 or newer, which the Langfuse hook needs: run "
                        "`uv python install 3.12`.")
     return missing
@@ -1420,22 +1447,25 @@ def setup_settings(act: Actions, tracing: dict) -> None:
         "org's Langfuse secret key")
 
 
-def check() -> None:
+def check(tracing: bool) -> None:
     """What init needs on this machine, before anything else. install.sh runs it ahead of slancha
-    auth, so a missing tool is found before an admin has approved a sign-in for it."""
-    missing = prerequisites()
+    auth, so a missing tool is found before anyone has approved a sign-in for it."""
+    missing = prerequisites(tracing)
     if missing:
         raise SlanchaError("\n".join(["Slancha needs, on this machine:"]
                                      + [f"  - {m}" for m in missing]))
-    say("This machine has what slancha init needs: claude, git, and uv with Python 3.10 or newer.")
+    say("This machine has what slancha init --tracing needs: claude, git, and uv with Python 3.10 "
+        "or newer." if tracing else "This machine has what slancha init needs: claude and git.")
 
 
-def init(dry_run: bool) -> None:
+def init(dry_run: bool, tracing: bool) -> None:
+    """The Slancha plugin; with `tracing`, also Langfuse's plugin and the org's tracing keys.
+    Without it nothing of tracing is touched, so tracing set up earlier stays as it is."""
     cfg = load_config()
     if cfg.token is None:
         raise SlanchaError("No Slancha token on this machine: run slancha auth first.")
-    tracing = load_tracing()
-    missing = prerequisites()
+    keys = load_tracing() if tracing else None
+    missing = prerequisites(tracing)
     if missing:
         raise SlanchaError("\n".join(["slancha init needs:"] + [f"  - {m}" for m in missing]))
     act = Actions(dry_run)
@@ -1446,20 +1476,26 @@ def init(dry_run: bool) -> None:
     markets = {row["name"]: row
                for row in json_list(["claude", "plugin", "marketplace", "list", "--json"])
                if isinstance(row.get("name"), str)}
-    setup_langfuse(act, installed, markets)
+    if keys is not None:
+        setup_langfuse(act, installed, markets)
     setup_slancha(act, installed, markets)
-    setup_settings(act, tracing)        # last: `claude plugin` writes settings.json too
-    for key in SDK_ENV:
-        if os.environ.get(key):
-            say(f"Warning: {key} is set in your shell. The Langfuse hook reads it before the "
-                "CC_LANGFUSE_* settings, so traces would go elsewhere; remove it from your shell "
-                "profile.")
+    if keys is not None:
+        setup_settings(act, keys)        # last: `claude plugin` writes settings.json too
+        for key in SDK_ENV:
+            if os.environ.get(key):
+                say(f"Warning: {key} is set in your shell. The Langfuse hook reads it before the "
+                    "CC_LANGFUSE_* settings, so traces would go elsewhere; remove it from your "
+                    "shell profile.")
     if dry_run:
-        say("Dry run done; run slancha init without --dry-run to make these changes.")
-    else:
+        say(f"Dry run done; run slancha init{' --tracing' if tracing else ''} without --dry-run "
+            "to make these changes.")
+    elif keys is not None:
         say(f"Done: Langfuse plugin at {LANGFUSE_COMMIT[:8]}, the Slancha plugin, and tracing to "
-            f"{tracing['host']}.", "Restart Claude Code (quit every running session) to load "
+            f"{keys['host']}.", "Restart Claude Code (quit every running session) to load "
             "them.")
+    else:
+        say("Done: the Slancha plugin. Restart Claude Code (quit every running session) to load "
+            "it.", "Tracing is separate: slancha auth --tracing, then slancha init --tracing.")
 
 
 # --- uninstall: undo init and auth on this machine ----------------------------------------------
@@ -1565,36 +1601,308 @@ def uninstall(dry_run: bool) -> None:
         "machine's." if not dry_run else "Dry run done; run slancha uninstall without --dry-run.")
 
 
+# --- tracing: what this machine's Claude Code sends to the org's Langfuse -------------------------
+# Connecting the org's Langfuse project is an admin's job in the console; these commands only read
+# and change this machine's side of it. None of them prints the secret key.
+
+SKILL_TAGS_OFF = ("skill tags are off, so Slancha cannot count traces per skill; any slancha "
+                  "tracing config change turns them back on")
+
+
+def read_settings() -> tuple[Path, dict]:
+    """Claude Code's user settings.json: its real path (it may be a link) and its object."""
+    path = claude_config_dir() / "settings.json"
+    real = Path(os.path.realpath(path))
+    try:
+        settings = json.loads(real.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return real, {}
+    except (OSError, ValueError):
+        settings = None
+    if not isinstance(settings, dict):
+        raise SlanchaError(f"{shown(path)} is not a JSON object; fix it first.")
+    return real, settings
+
+
+def langfuse_options(settings: dict) -> dict:
+    configs = settings.get("pluginConfigs")
+    entry = configs.get(LANGFUSE_PLUGIN) if isinstance(configs, dict) else None
+    options = entry.get("options") if isinstance(entry, dict) else None
+    return options if isinstance(options, dict) else {}
+
+
+def masked(options: dict) -> dict:
+    return {k: "(set)" if "SECRET" in k.upper() else v for k, v in options.items()}
+
+
+def langfuse_row() -> dict | None:
+    """The Langfuse plugin as `claude plugin list` reports it, or None when not installed."""
+    return next((row for row in json_list(["claude", "plugin", "list", "--json"])
+                 if row.get("id") == LANGFUSE_PLUGIN), None)
+
+
+def notes(row: dict | None) -> list[str]:
+    """What Claude Code says about the plugin, e.g. that a project setting overrides the user's."""
+    found = row.get("notes") if row else None
+    return [printable(n) for n in found if isinstance(n, str)] if isinstance(found, list) else []
+
+
+def tracing_local() -> dict:
+    plugin = {"id": LANGFUSE_PLUGIN, "installed": None, "enabled": None, "scope": None,
+              "notes": [], "problem": None}
+    if shutil.which("claude") is None:
+        plugin["problem"] = "`claude` is not on PATH"
+    else:
+        try:
+            row = langfuse_row()
+        except SlanchaError as exc:
+            plugin["problem"] = str(exc)
+        else:
+            plugin.update(installed=row is not None, notes=notes(row),
+                          enabled=row.get("enabled") if row else None,
+                          scope=row.get("scope") if row else None)
+    repo = langfuse_dir()
+    head = git_head(repo) if (repo / ".git").exists() and shutil.which("git") else ""
+    where = {"path": shown(claude_config_dir() / "settings.json"), "host": None,
+             "keys_set": False, "options": {}, "problem": None}
+    try:
+        settings = read_settings()[1]
+    except SlanchaError as exc:
+        where["problem"] = str(exc)
+    else:
+        env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+        host = env.get("CC_LANGFUSE_BASE_URL")
+        where.update(host=host if isinstance(host, str) else None,
+                     keys_set=bool(env.get("CC_LANGFUSE_PUBLIC_KEY")
+                                   and env.get("CC_LANGFUSE_SECRET_KEY")),
+                     options=masked(langfuse_options(settings)))
+    return {"plugin": plugin, "clone": {"path": shown(repo), "pinned": LANGFUSE_COMMIT,
+                                        "head": head or None}, "settings": where}
+
+
+def day(at) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(at)) if isinstance(at, (int, float)) else "?"
+
+
+def tracing_status(cfg: Config, args):
+    local = tracing_local()
+    workspace, error = None, None
+    try:
+        workspace = api_json(cfg, "GET", "/api/tracing/status")
+    except SlanchaError as exc:          # the machine's side is worth showing all the same
+        error = str(exc)
+    plugin, clone, where = local["plugin"], local["clone"], local["settings"]
+    lines = ["On this machine:"]
+    if plugin["problem"]:
+        lines.append(f"  Langfuse plugin: unknown ({plugin['problem']})")
+    elif not plugin["installed"]:
+        lines.append("  Langfuse plugin: not installed (slancha auth --tracing, then slancha init "
+                     "--tracing)")
+    else:
+        lines.append(f"  Langfuse plugin: {'enabled' if plugin['enabled'] else 'disabled'}, "
+                     f"installed for scope {printable(plugin['scope'])}")
+    lines += [f"    Claude Code: {n}" for n in plugin["notes"]]
+    head = clone["head"]
+    lines.append(f"  Clone {clone['path']}: " + (
+        f"at the pinned commit {LANGFUSE_COMMIT[:8]}" if head == LANGFUSE_COMMIT else
+        f"at {head[:8]}, not the pinned {LANGFUSE_COMMIT[:8]} (slancha init --tracing)" if head
+        else "not there"))
+    if where["problem"]:
+        lines.append(f"  Settings: {where['problem']}")
+    else:
+        lines.append(f"  Settings {where['path']}: " + (
+            f"traces go to {printable(where['host'])}" if where["host"] else "no Langfuse host")
+            + (", keys set" if where["keys_set"] else ", keys not set"))
+        if where["options"]:
+            lines.append("    options: " + ", ".join(f"{k}={json.dumps(v)}"
+                                                    for k, v in sorted(where["options"].items())))
+        if where["options"].get("CC_LANGFUSE_SKILL_TAGS") is False:
+            lines.append(f"    Warning: {SKILL_TAGS_OFF}.")
+    lines.append("In your workspace:")
+    if error:
+        lines.append(f"  {error}")
+    elif not isinstance(workspace, dict) or not workspace.get("configured"):
+        lines.append("  Tracing is not connected: an admin connects the workspace's Langfuse "
+                     "project in the console.")
+    else:
+        traces = workspace.get("traces")
+        lines.append(f"  Langfuse {printable(workspace.get('host'))}: "
+                     + (f"{traces} traces since {day(workspace.get('since'))}"
+                        if workspace.get("connected") else "connected, no traces yet"))
+        counts = workspace.get("skills")
+        if isinstance(counts, dict) and counts:
+            lines.append("  per skill: " + ", ".join(f"{printable(k, 64)} {v}"
+                                                     for k, v in sorted(counts.items())))
+    return {"local": local, "workspace": workspace, "workspace_error": error}, lines, 0
+
+
+def tracing_switch(cfg: Config, args):
+    """`claude plugin enable|disable` the Langfuse plugin, for the user or (--project) only in
+    the current directory's .claude/settings.local.json, the scope that is not committed."""
+    on = args.action == "on"
+    if shutil.which("claude") is None:
+        raise SlanchaError("`claude` is not on PATH: install Claude Code.")
+    if langfuse_row() is None:
+        if not on:
+            return ({"tracing": "off", "changed": False, "installed": False},
+                    ["The Langfuse plugin is not installed, so nothing is traced."], 0)
+        raise SlanchaError("The Langfuse plugin is not installed: run slancha auth --tracing, then "
+                           "slancha init --tracing.")
+    scope = "local" if args.project else "user"
+    where = (f"in this project ({shown(Path.cwd() / '.claude' / 'settings.local.json')}, not "
+             "committed)" if args.project
+             else f"for your user ({shown(claude_config_dir() / 'settings.json')})")
+    cmd = ["claude", "plugin", "enable" if on else "disable", LANGFUSE_PLUGIN, "--scope", scope,
+           "--json"]
+    result = run(cmd)
+    try:
+        answer = json.loads((result.stdout.strip().splitlines() or [""])[-1])
+    except ValueError:
+        answer = None
+    # Claude Code exits 1 when the plugin is already in that state; that is no failure here.
+    if result.returncode != 0 and not (isinstance(answer, dict)
+                                       and answer.get("alreadyInGoalState") is True):
+        raise failed(cmd, result)
+    state = "on" if on else "off"
+    row = langfuse_row()
+    lines = [f"Tracing {'is now' if result.returncode == 0 else 'was already'} {state} {where}."]
+    lines += [f"Claude Code: {n}" for n in notes(row)]
+    lines.append("New Claude Code sessions follow it; restart the ones running.")
+    return ({"tracing": state, "scope": scope, "changed": result.returncode == 0,
+             "enabled": row.get("enabled") if row else None, "notes": notes(row)}, lines, 0)
+
+
+def tracing_config(cfg: Config, args):
+    real, settings = read_settings()
+    path = shown(claude_config_dir() / "settings.json")
+    options = langfuse_options(settings)
+    wanted = {}
+    if args.max_chars is not None:
+        wanted["CC_LANGFUSE_MAX_CHARS"] = args.max_chars
+    if args.images is not None:
+        wanted["CC_LANGFUSE_CAPTURE_IMAGES"] = args.images == "on"
+    if not wanted:
+        lines = [f"Langfuse plugin options in {path}:"] + (
+            [f"  {k} = {json.dumps(v)}" for k, v in sorted(masked(options).items())]
+            or ["  none set: the plugin's defaults apply"])
+        if options.get("CC_LANGFUSE_SKILL_TAGS") is False:
+            lines.append(f"Warning: {SKILL_TAGS_OFF}.")
+        return {"path": path, "options": masked(options), "changed": []}, lines, 0
+    # Slancha counts traces per skill by their skill tags: whatever else changes, they stay on.
+    wanted["CC_LANGFUSE_SKILL_TAGS"] = True
+    changed = {k: v for k, v in wanted.items() if options.get(k) != v}
+    if changed:
+        configs = settings.setdefault("pluginConfigs", {})
+        entry = configs.setdefault(LANGFUSE_PLUGIN, {}) if isinstance(configs, dict) else None
+        options = entry.setdefault("options", {}) if isinstance(entry, dict) else None
+        if not isinstance(options, dict):
+            raise SlanchaError(f"{path} has a `pluginConfigs` that is not an object; fix it first.")
+        options.update(changed)
+        real.parent.mkdir(parents=True, exist_ok=True)
+        write_private(real, json.dumps(settings, indent=2) + "\n")   # it may hold the secret
+    shown_set = ", ".join(f"{k}={json.dumps(v)}" for k, v in wanted.items())
+    lines = [f"{'Set' if changed else 'Already set'} in {path}: {shown_set}."]
+    if "CC_LANGFUSE_SKILL_TAGS" in changed:
+        lines.append("Skill tags were off and are on again: Slancha counts traces per skill by "
+                     "them.")
+    if changed:
+        lines.append("Written with mode 0600 (readable only by you). New Claude Code sessions use "
+                     "it.")
+    return {"path": path, "options": masked(options), "changed": sorted(changed)}, lines, 0
+
+
+# --- the command line from a terminal ------------------------------------------------------------
+
+CLI_COMMANDS = ("auth", "init", "uninstall", "tracing")
+EPILOG = """\
+Also: slancha update [skill] [--dry-run] [--force] and slancha status, which /slancha:update
+and /slancha:status run.
+
+Exit codes: 0 done, 1 an error or a refusal, 2 a usage error, 130 stopped with Ctrl-C.
+--json prints the API's JSON (or the documented wrapper) on stdout; an error then prints
+{"error": "<message>", "status": <HTTP status or null>}."""
+
+
+def positive(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a positive whole number")
+    return number
+
+
 def cli(argv: list[str]) -> int:
-    """`slancha auth` and `slancha init`, from a terminal: exit 1 on a problem, 130 on Ctrl-C."""
-    parser = argparse.ArgumentParser(prog="slancha", description="Set up Slancha on this machine.")
-    commands = parser.add_subparsers(dest="command", required=True)
-    au = commands.add_parser("auth", help="sign in; an org admin approves the code")
+    """The terminal commands: exit 1 on a problem, 2 on bad usage, 130 on Ctrl-C."""
+    parser = argparse.ArgumentParser(prog="slancha", epilog=EPILOG,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     description="Slancha on this machine.")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="command")
+    au = commands.add_parser("auth", help="sign in; you approve the code in the console")
     au.add_argument("--api", help="the Slancha API (default: SLANCHA_API_URL, config.json, "
                                   f"{DEFAULT_API_URL})")
     au.add_argument("--no-browser", action="store_true", help="only print the approval link")
+    au.add_argument("--tracing", action="store_true",
+                    help="also ask for the org's tracing keys, for slancha init --tracing; an org "
+                         "admin approves")
     ini = commands.add_parser("init", help="configure Claude Code for Slancha")
     ini.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
     ini.add_argument("--check", action="store_true",
                      help="only check that this machine has what init needs; change nothing")
+    ini.add_argument("--tracing", action="store_true",
+                     help="also trace every Claude Code session to the org's Langfuse: Langfuse's "
+                          "plugin and the keys from slancha auth --tracing (needs uv)")
     un = commands.add_parser("uninstall", help="undo slancha init and slancha auth on this machine")
     un.add_argument("--dry-run", action="store_true", help="say what would change; change nothing")
+
+    tr = commands.add_parser("tracing", help="this machine's tracing to the org's Langfuse")
+    tracing = tr.add_subparsers(dest="action", required=True, metavar="action")
+    sub = tracing.add_parser("status", help="the Langfuse plugin, its settings, and what the "
+                                            "workspace receives (needs an agent token)")
+    sub.set_defaults(run=tracing_status)
+    for action, verb in (("on", "enable"), ("off", "disable")):
+        sub = tracing.add_parser(action, help=f"{verb} the Langfuse plugin in Claude Code")
+        sub.add_argument("--project", action="store_true",
+                         help="only in the project in the current directory, in its "
+                              ".claude/settings.local.json, which is not committed")
+        sub.set_defaults(run=tracing_switch)
+    sub = tracing.add_parser("config", help="show or set the Langfuse plugin's options",
+                             description="Without options, shows them. Skill tags stay on: "
+                                         "Slancha counts traces per skill by them.")
+    sub.add_argument("--max-chars", type=positive, metavar="N",
+                     help="cut each captured input or output at N characters")
+    sub.add_argument("--images", choices=("on", "off"), help="upload images to Langfuse")
+    sub.set_defaults(run=tracing_config)
+    for sub in tracing.choices.values():
+        sub.add_argument("--json", action="store_true", help="print JSON")
+
     args = parser.parse_args(argv)
+    as_json = getattr(args, "json", False)
     try:
         if args.command == "auth":
-            auth(args.api, not args.no_browser)
+            auth(args.api, not args.no_browser, args.tracing)
         elif args.command == "uninstall":
             uninstall(args.dry_run)
-        elif args.check:
-            check()
+        elif args.command == "init":
+            check(args.tracing) if args.check else init(args.dry_run, args.tracing)
         else:
-            init(args.dry_run)
+            doc, lines, code = args.run(load_config(), args)
+            if as_json:
+                print(json.dumps(doc, indent=2))
+            else:
+                say(*lines)
+            return code
     except KeyboardInterrupt:
         say("", "Stopped. Nothing was saved." if args.command == "auth" else
-            f"Stopped. Run slancha {args.command} again to finish; it skips what is already done.")
+            f"Stopped. Run slancha {args.command} again to finish; it skips what is already done."
+            if args.command in ("init", "uninstall") else "Stopped.")
         return 130
     except SlanchaError as exc:
-        say(str(exc))
+        if as_json:
+            print(json.dumps({"error": str(exc), "status": getattr(exc, "status", None)}))
+        else:
+            say(str(exc))
         return 1
     return 0
 
@@ -1622,7 +1930,7 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
         return 0
-    if argv[:1] in (["auth"], ["init"], ["uninstall"]):
+    if argv[:1] and argv[0] in CLI_COMMANDS + ("-h", "--help"):
         return cli(argv)
     parser = _Parser(prog="slancha.py", description="Slancha skills for Claude Code.")
     commands = parser.add_subparsers(dest="command")
