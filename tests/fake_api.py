@@ -269,7 +269,7 @@ class FakeSlancha:
             scan = self.start_job("scan", name, revision)
             return 201, {"skill": name, "proposal_id": self.proposals[name]["id"],
                          "kind": self.proposals[name]["kind"], "revision": revision,
-                         "gate": self.proposals[name]["gate"], "scan_job": scan["id"],
+                         "gate": self.card(name)["gate"], "scan_job": scan["id"],
                          "scan_error": None, "criteria": self.evaluate(name, files)}
         if path == "/api/jobs":
             return 200, [j for j in self.jobs.values() if query.get("skill") in (None, j["skill"])]

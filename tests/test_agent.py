@@ -171,7 +171,8 @@ class CriteriaAndUploadTests(AgentCase):
         record = self.api.proposals["demo"]
         self.assertIn(f"Uploaded demo: revision {record['revision'][:12]}, proposal "
                       f"{record['id']} (update). It waits for a person to review it", out)
-        self.assertIn("Gate: blocked", out)                  # by the criteria, as the card is
+        self.assertIn("Gate: blocked\n  blocked: acceptance criteria: scripts/run.sh must exist: "
+                      "scripts/run.sh is missing", out)
         self.assertIn("Acceptance criteria: fails 1 of 2", out)
         self.assertIn("  ✗ scripts/run.sh must exist: scripts/run.sh is missing", out)
         self.assertIn("Security scan: job job_1; slancha job job_1 --wait", out)

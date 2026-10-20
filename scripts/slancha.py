@@ -2088,7 +2088,7 @@ def upload(cfg: Config, args):
     criteria = doc.get("criteria")
     unmet = isinstance(criteria, dict) and criteria.get("ok") is False
     gate = doc.get("gate")
-    if unmet and isinstance(gate, dict):           # the review card applies the criteria too
+    if unmet and isinstance(gate, dict):           # as the API does, should it not have
         gate = {**gate, "promotable": False}
     lines = left_out_line(left_out, args.json) + [
         f"Uploaded {printable(doc.get('skill'), 64)}: revision {rev(doc.get('revision'))}, "
