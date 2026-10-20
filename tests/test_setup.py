@@ -563,7 +563,8 @@ class ReleaseTests(unittest.TestCase):
         if result.returncode and "not a git repository" in result.stderr:
             self.skipTest("not a git checkout")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("PLACEHOLDER", result.stdout)
+        # The installer's own guard names the placeholder; only the two pins must not hold it.
+        self.assertNotRegex(result.stdout, r'\nSLANCHA_(REF|SHA256)=[^\n]*PLACEHOLDER')
         self.assertRegex(result.stdout, r'\nSLANCHA_REF="[0-9a-f]{40}"\n')
         self.assertRegex(result.stdout, r'\nSLANCHA_SHA256="[0-9a-f]{64}"\n')
 
