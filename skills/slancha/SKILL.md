@@ -62,6 +62,10 @@ An HTTP 5xx is Slancha's side, not your package: tell the user rather than retry
    - exit 3: it misses the criteria and cannot be approved; a person must reject it. That is why
      step 2 comes first.
    - exit 1: its security scan did not start. Run `slancha scan <s> --wait`; do not upload again.
+
+   With `--json` there is no `Uploaded` line: an answer with `proposal_id` (and `scan_error` when
+   the scan did not start) means it is stored, whatever the exit code; only `{"error", "status"}`
+   means nothing was stored.
 4. Follow the security scan with `slancha job <scan job id> --wait`.
 5. Run `slancha pending <s>`. `Gate: blocked` lists what stops approval; warnings never block.
    The `no source declared` and `no license declared` warnings go away with `source:` and

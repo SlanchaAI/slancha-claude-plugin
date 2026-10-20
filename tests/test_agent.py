@@ -208,7 +208,11 @@ class CriteriaAndUploadTests(AgentCase):
                       "starts the scan again.", out)
         self.assertNotIn("--wait follows it", out)
         doc = self.as_json("upload", self.package(), code=1)    # refused: a change already waits
-        self.assertEqual(doc["status"], 409)
+        self.assertEqual((set(doc), doc["status"]), ({"error", "status"}, 409))
+        self.api.proposals.clear()
+        doc = self.as_json("upload", self.package(), code=1)    # stored, but not scanned
+        self.assertEqual(doc["scan_error"], "the job could not start: RuntimeError")
+        self.assertIn("proposal_id", doc)
         out = self.slancha("scan", "demo", "--wait", code=1)
         self.assertIn("Slancha answered HTTP 502: the job could not start: RuntimeError. That is on "
                       "Slancha's side, not in what was sent: try again later, and tell an admin if "
