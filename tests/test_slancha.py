@@ -499,6 +499,27 @@ class UsageTests(PluginCase):
         self.assertIn("dropped 1 refused events (HTTP 400)", self.run_script("flush"))
         self.assertEqual(self.spool(), [])
 
+    def test_expired_token_leaves_one_notice_for_the_next_session(self):
+        self.skill_call(tool_use_id="toolu_a")
+        self.api.expired = True
+        for _ in range(2):
+            self.assertIn("kept for later: Your Slancha token expired; run slancha auth",
+                          self.run_script("flush"))
+        self.assertEqual(len(self.spool()), 1)
+        self.assertEqual(list((self.home / ".cache" / "slancha").glob("token-expired*")),
+                         [self.home / ".cache" / "slancha" / "token-expired"])
+        notice = json.loads(self.hook(hook_event_name="SessionStart", source="startup"))
+        self.assertEqual(set(notice), {"systemMessage"})
+        self.assertIn("Your Slancha token expired; run slancha auth", notice["systemMessage"])
+        self.assertEqual(self.hook(hook_event_name="SessionStart", source="startup"), "")
+        self.assertIn("Your Slancha token expired", self.run_script("update"))
+
+    def test_expired_token_at_the_daily_check(self):
+        self.api.expired = True
+        notice = json.loads(self.hook(hook_event_name="SessionStart", source="startup"))
+        self.assertIn("Your Slancha token expired", notice["systemMessage"])
+        self.assertEqual(self.hook(hook_event_name="SessionStart", source="startup"), "")
+
     def test_stop_hook_uploads_in_the_background(self):
         self.skill_call()
         stop = {**self.base, "hook_event_name": "Stop", "stop_hook_active": False,

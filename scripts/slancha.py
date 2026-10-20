@@ -98,9 +98,14 @@ class Offline(SlanchaError):
 
 
 class ApiError(SlanchaError):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, detail: str = ""):
         super().__init__(message)
         self.status = status
+        self.detail = detail        # the API's own `detail`, for callers that act on it
+
+
+class Expired(ApiError):
+    """The API refused the token because it expired: an agent token lapses after 30 days."""
 
 
 class Refused(SlanchaError):
@@ -239,13 +244,19 @@ def _detail(error: urllib.error.HTTPError) -> str:
     detail = doc.get("detail") if isinstance(doc, dict) else None
     if not isinstance(detail, str):
         return ""
-    return "".join(c if c.isprintable() else " " for c in detail)[:200]
+    # Long enough for an upload's refusal or the acceptance criteria a change fails.
+    return "".join(c if c.isprintable() else " " for c in detail)[:1000]
 
 
 # What an API that is not this console's looks like from here: a 404 or 429 with no Slancha
 # `detail`. The default, https://api.slancha.ai, answers every request that way today.
 WRONG_API = (" Is {host} your Slancha API? The Claude Code page of your Slancha console shows the "
              "commands with it: set SLANCHA_API_URL, or run slancha auth --api <url>.")
+EXPIRED_DETAIL = "this token expired; run slancha auth again"
+TOKEN_EXPIRED = ("Your Slancha token expired; run slancha auth in a terminal (with --manage for a "
+                 "new agent token).")
+# What the API answers a plain personal token on a route only people and agent tokens may use.
+PLAIN_TOKEN_DETAIL = "a token cannot do this"
 
 
 def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 20,
@@ -272,6 +283,8 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
                 raise ApiError(error.code, f"{host} answered with a redirect (HTTP {error.code}); "
                                            "not following it.") from None
             detail = _detail(error)
+        if error.code == 401 and detail == EXPIRED_DETAIL:
+            raise Expired(401, TOKEN_EXPIRED, detail) from None
         if error.code == 401:
             message = ("Slancha did not accept the token (HTTP 401). Create a new one in the "
                        "Slancha console (Claude Code page) and store it again.")
@@ -279,7 +292,9 @@ def request(cfg: Config, method: str, path: str, *, body=None, timeout: float = 
             message = f"Slancha answered HTTP {error.code}" + (f": {detail}" if detail else ".")
             if error.code in (404, 429) and not detail:
                 message += WRONG_API.format(host=host)
-        raise ApiError(error.code, message) from None
+            if error.code == 403 and detail.startswith(PLAIN_TOKEN_DETAIL):
+                message += " This needs an agent token: run slancha auth --manage."
+        raise ApiError(error.code, message, detail) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", None) or error.__class__.__name__
         raise Offline(f"Cannot reach {host} ({reason}).") from None
@@ -809,6 +824,10 @@ def flush(cfg: Config) -> str:
                 ids = {e["id"].lower() for e in batch}
                 try:
                     request(cfg, "POST", "/api/usage/skills", body={"events": batch}, timeout=15)
+                except Expired as exc:
+                    note_expired()
+                    result = f"kept for later: {exc}"
+                    break
                 except ApiError as exc:
                     if exc.status == 400:            # never acceptable; retrying cannot help
                         done |= ids
@@ -913,9 +932,24 @@ def record(event: dict, name, success, source) -> None:
                   "at": int(time.time())})
 
 
+def note_expired() -> None:
+    """Leave one notice for the next session start, however many uploads find the token
+    expired."""
+    with contextlib.suppress(OSError):
+        (_cache() / "token-expired").touch()
+
+
 def session_notice(event: dict) -> str | None:
-    """At most once a day: which installed skills have a newer published revision."""
+    """That the token expired, when an upload found it so; else at most once a day, which
+    installed skills have a newer published revision."""
     stamp = cache_dir() / "update-check.stamp"
+    try:
+        (cache_dir() / "token-expired").unlink()
+    except OSError:
+        pass
+    else:
+        stamp.touch()                 # today's update check would only find the same
+        return TOKEN_EXPIRED
     try:
         if time.time() - stamp.stat().st_mtime < 86400:
             return None
@@ -929,7 +963,10 @@ def session_notice(event: dict) -> str | None:
         return None
     _cache()
     stamp.touch()
-    library = fetch_library(cfg, timeout=3)
+    try:
+        library = fetch_library(cfg, timeout=3)
+    except Expired:
+        return TOKEN_EXPIRED
     stale = sorted({s.name for s in managed
                     if published(library.get(s.name)) not in (None, s.revision)})
     if not stale:

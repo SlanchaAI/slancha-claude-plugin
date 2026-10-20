@@ -72,6 +72,7 @@ class FakeSlancha:
         self.usage: dict[str, dict] = {}     # stored events by id
         self.requests: list[tuple[str, str, str | None]] = []
         self.redirect: str | None = None     # answer everything with a 302 to this origin
+        self.expired = False                 # answer every token with 401 "this token expired"
         self.not_slancha = False             # answer everything as a throttled AWS front would
         self.zip_for = None                  # callable(skill, revision) -> (bytes, headers)
         self.usage_status: int | None = None     # answer usage posts with this status instead
@@ -162,6 +163,9 @@ def _handler(fake: FakeSlancha):
                 return False
             if fake.redirect:
                 self.send(302, headers={"Location": fake.redirect + self.path})
+                return False
+            if fake.expired:
+                self.send_json(401, {"detail": "this token expired; run slancha auth again"})
                 return False
             if self.headers.get("Authorization") != f"Bearer {fake.token}":
                 self.send_json(401, {"detail": "unknown personal token"})
