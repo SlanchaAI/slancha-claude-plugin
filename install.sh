@@ -4,9 +4,10 @@
 #   curl -fsSL https://dev.slancha.ai/install.sh | sh
 #
 # Downloads scripts/slancha.py from SlanchaAI/slancha-claude-plugin at a pinned commit, checks its
-# sha256, installs it as ~/.local/bin/slancha, then runs `slancha auth` (an org admin approves the
-# sign-in) and `slancha init` (the Claude Code plugins and tracing settings). SLANCHA_API_URL
-# picks another Slancha API.
+# sha256, installs it as ~/.local/bin/slancha, then runs `slancha init --check` (claude and git
+# are there), `slancha auth` (you approve the sign-in) and `slancha init` (the Slancha plugin for
+# Claude Code; tracing is separate). SLANCHA_API_URL picks the Slancha API; the Claude Code page
+# of the Slancha console shows the command with it.
 #
 # The release step replaces both placeholders: the commit (or tag) to install from, and the
 # sha256 of scripts/slancha.py at that commit.
@@ -43,9 +44,10 @@ main() {
   say "  1. download $url"
   say "     and check its sha256 ($SLANCHA_SHA256)"
   say "  2. install it as $share/slancha.py, with the command $bin/slancha"
-  say "  3. run 'slancha auth': sign in to Slancha${SLANCHA_API_URL:+ at $SLANCHA_API_URL}; an admin of your org approves it"
-  say "  4. run 'slancha init': install the Langfuse and Slancha plugins for Claude Code and write"
-  say "     the tracing keys to ~/.claude/settings.json (mode 0600)"
+  say "  3. run 'slancha init --check': stop here if claude or git is missing, before any sign-in"
+  say "  4. run 'slancha auth': sign in to Slancha${SLANCHA_API_URL:+ at $SLANCHA_API_URL}; you approve it in the console"
+  say "  5. run 'slancha init': install the Slancha plugin for Claude Code (tracing is separate:"
+  say "     slancha auth --tracing, then slancha init --tracing)"
   say ""
 
   umask 077
@@ -69,6 +71,9 @@ main() {
   # stdin is this script (curl | sh); the commands read the terminal instead.
   tty=/dev/null
   if (: </dev/tty) 2>/dev/null; then tty=/dev/tty; fi
+  # A missing tool is cheaper to find before an admin approves a sign-in it would waste.
+  "$bin/slancha" init --check
+  say ""
   "$bin/slancha" auth <"$tty"
   say ""
   "$bin/slancha" init <"$tty"

@@ -13,6 +13,7 @@ docker run --rm --memory 3g -v "$root:/plugin:ro" "$image" sh -ec '
   cd /plugin
   claude plugin validate --strict .           # the marketplace manifest
   claude plugin validate --strict commands    # the command files
+  claude plugin validate --strict skills      # the skill files
   # A directory holding marketplace.json validates as a marketplace; without it, as a plugin,
   # which is what checks plugin.json and hooks/hooks.json.
   cp -r /plugin /tmp/plugin && rm /tmp/plugin/.claude-plugin/marketplace.json

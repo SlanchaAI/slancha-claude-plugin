@@ -22,7 +22,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fake_api import TOKEN, FakeSlancha, entry, sha256, skill_zip  # noqa: E402
+from fake_api import AGENT_TOKEN, TOKEN, FakeSlancha, entry, sha256, skill_zip  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "slancha.py"
 
@@ -181,6 +181,13 @@ class UpdateTests(PluginCase):
                               "uses_7d": 0})
         self.assertIn("fresh: not published yet", self.run_script("update", "fresh"))
         self.assertIn("nope: not in your Slancha library", self.run_script("update", "nope"))
+        self.install_v1()
+        del self.api.published["demo"]
+        self.api.rows.append({"name": "demo", "description": "", "revision": "", "active": False,
+                              "updated_at": 1.0, "pending": True, "pending_kind": "update",
+                              "uses_7d": 0})
+        self.assertIn("demo: not published yet (it is waiting for review in the console)",
+                      self.run_script("update"))
 
     def test_unmanaged_directory_is_not_replaced_without_force(self):
         self.api.publish("demo", V1)
@@ -327,6 +334,14 @@ class NetworkTests(PluginCase):
         out = self.run_script("update", "demo")
         self.assertIn("answered with a redirect (HTTP 302); not following it", out)
         self.assertEqual(elsewhere.requests, [])
+        self.assertFalse((self.skills / "demo").exists())
+
+    def test_an_api_that_is_not_slancha_names_the_setting_to_fix(self):
+        self.api.not_slancha = True
+        out = self.run_script("update", "demo")
+        self.assertIn("Slancha answered HTTP 429.", out)
+        self.assertIn("your Slancha API? The Claude Code page of your Slancha console", out)
+        self.assertIn("set SLANCHA_API_URL", out)
         self.assertFalse((self.skills / "demo").exists())
 
     def test_api_down_exits_zero_with_a_message(self):
@@ -491,6 +506,27 @@ class UsageTests(PluginCase):
         self.assertIn("dropped 1 refused events (HTTP 400)", self.run_script("flush"))
         self.assertEqual(self.spool(), [])
 
+    def test_expired_token_leaves_one_notice_for_the_next_session(self):
+        self.skill_call(tool_use_id="toolu_a")
+        self.api.expired = True
+        for _ in range(2):
+            self.assertIn("kept for later: Your Slancha token expired; run slancha auth",
+                          self.run_script("flush"))
+        self.assertEqual(len(self.spool()), 1)
+        self.assertEqual(list((self.home / ".cache" / "slancha").glob("token-expired*")),
+                         [self.home / ".cache" / "slancha" / "token-expired"])
+        notice = json.loads(self.hook(hook_event_name="SessionStart", source="startup"))
+        self.assertEqual(set(notice), {"systemMessage"})
+        self.assertIn("Your Slancha token expired; run slancha auth", notice["systemMessage"])
+        self.assertEqual(self.hook(hook_event_name="SessionStart", source="startup"), "")
+        self.assertIn("Your Slancha token expired", self.run_script("update"))
+
+    def test_expired_token_at_the_daily_check(self):
+        self.api.expired = True
+        notice = json.loads(self.hook(hook_event_name="SessionStart", source="startup"))
+        self.assertIn("Your Slancha token expired", notice["systemMessage"])
+        self.assertEqual(self.hook(hook_event_name="SessionStart", source="startup"), "")
+
     def test_stop_hook_uploads_in_the_background(self):
         self.skill_call()
         stop = {**self.base, "hook_event_name": "Stop", "stop_hook_active": False,
@@ -548,6 +584,10 @@ class UsageTests(PluginCase):
         out = self.run_script("status")
         self.assertIn(f"demo  {self.v1[:12]}  ~/.claude/skills  update available: {v2[:12]}", out)
         self.assertIn("Usage: 1 event waiting to upload.", out)
+        self.assertIn("Token: skills:read, usage:write; does not expire; role viewer.", out)
+        out = self.run_script("status", env={**self.env, "SLANCHA_TOKEN": AGENT_TOKEN})
+        self.assertIn("Token: skills:read, usage:write, manage; expires ", out)
+        self.assertIn("days); role proposer.", out)
 
 
 if __name__ == "__main__":

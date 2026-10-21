@@ -168,5 +168,17 @@ events, requests = claude("/slancha:status")
 check("/slancha:status reports", "Slancha plugin" in sent_to_model(requests)
       and "demo" in sent_to_model(requests), sent_to_model(requests)[-600:])
 
+# The plugin's own skill, for coding agents: offered, and naming the CLI at the plugin's root.
+events, requests = claude("upload my skill to Slancha",
+                          plan=[("tool", "Skill", {"skill": "slancha:slancha"}), ("text", "Done.")])
+init = next((e for e in events if e.get("subtype") == "init"), {})
+check("the plugin's slancha skill is offered", "slancha:slancha" in init.get("skills", []),
+      init.get("skills"))
+loaded = sent_to_model(requests)
+check("the skill's CLI path is the plugin's own", "/plugin/scripts/slancha.py" in loaded
+      and "CLAUDE_PLUGIN_ROOT" not in loaded and "criteria <s> --check" in loaded, loaded[-600:])
+check("the plugin's skill is not recorded as usage",
+      not [e for e in recorded() if e["skill"] != "demo"], recorded())
+
 print(f"\n{'all checks passed' if not failures else f'{len(failures)} failed: {failures}'}")
 sys.exit(1 if failures else 0)
