@@ -25,7 +25,7 @@ read, print or handle the token yourself.
 | `slancha criteria <s>` | the rules, and how the served and waiting revisions fare |
 | `slancha criteria <s> --check <dir or .zip>` | check a package against them; stores nothing |
 | `slancha criteria <s> --revision <hex>` | check a stored revision |
-| `slancha upload <dir or .zip> [--name N]` | propose the package for review; starts a security scan |
+| `slancha upload <path> [path ...] [--name N] [--dry-run]` | propose each skill for review; starts a security scan. A directory with no `SKILL.md` uploads each child skill folder or `.zip`. `--dry-run` checks and uploads nothing. `--name` only for one skill |
 | `slancha pending [<s>]` | what waits for review, or one skill's review card and gate |
 | `slancha review <s>` | the waiting change's card, evidence and every diff; read-only |
 | `slancha jobs [--skill S]` | recent scan, draft and outcomes jobs |
@@ -57,15 +57,20 @@ An HTTP 5xx is Slancha's side, not your package: tell the user rather than retry
 1. Work in a directory with `SKILL.md` at its top; its frontmatter `name` is the skill's name.
 2. Run `slancha criteria <s>` to see the rules, then `slancha criteria <s> --check <dir>`, and fix
    every ✗ until it exits 0. Keep what the skill does; tell the user what you changed.
-3. Run `slancha upload <dir>`. Once it prints `Uploaded`, the change is stored, and the skill takes
-   no other upload until a person approves or rejects it, whatever the exit code:
+3. Run `slancha upload <dir>`. Several skills can go in one command (`slancha upload <dir> <zip>`,
+   or a parent folder of skill folders and zips). Each is its own proposal; a failure does not stop
+   the rest, and the command exits 3 if any skill misses its criteria. `--name` is only for one
+   skill. `--dry-run` packages and checks criteria and uploads nothing. Once a skill prints
+   `Uploaded`, that change is stored, and the skill takes no other upload until a person approves
+   or rejects it, whatever the exit code:
    - exit 3: it misses the criteria and cannot be approved; a person must reject it. That is why
      step 2 comes first.
    - exit 1: its security scan did not start. Run `slancha scan <s> --wait`; do not upload again.
 
-   With `--json` there is no `Uploaded` line: an answer with `proposal_id` (and `scan_error` when
-   the scan did not start) means it is stored, whatever the exit code; only `{"error", "status"}`
-   means nothing was stored.
+   With `--json` there is no `Uploaded` line. One skill path answers with the API object: `proposal_id`
+   (and `scan_error` when the scan did not start) means it is stored, whatever the exit code; only
+   `{"error", "status"}` means nothing was stored. More than one skill, or a folder of them, answers
+   with an array of `{path, skill, exit, uploaded, result|error}`.
 4. Follow the security scan with `slancha job <scan job id> --wait`.
 5. Run `slancha pending <s>`. `Gate: blocked` lists what stops approval; warnings never block.
    The `no source declared` and `no license declared` warnings go away with `source:` and

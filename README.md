@@ -109,7 +109,7 @@ the token's capabilities and expiry.
 | `slancha whoami` | `GET /api/me`: user, role, capabilities, expiry |
 | `slancha skills` | `GET /api/skills` |
 | `slancha skill <s>` | `GET /api/skills/<s>/versions` and `/criteria`; `--json` prints `{"versions", "criteria"}` |
-| `slancha upload <dir\|zip> [--name N]` | `POST /api/skills/upload`: a directory of text files (hidden files, `__pycache__` and `slancha-manifest.json` left out) or a `.zip` as it is; prints the revision, the proposal, the gate, the acceptance criteria and the security scan job |
+| `slancha upload <path> [path ...] [--name N] [--dry-run]` | `POST /api/skills/upload` once per skill. A path is a directory of text files (hidden files, `__pycache__` and `slancha-manifest.json` left out) or a `.zip` (sent as it is, after the same limits). A directory with no `SKILL.md` is a folder of skills: each child directory that has `SKILL.md`, and each `.zip`, is uploaded on its own. `--name` only with exactly one skill. `--dry-run` packages, validates and runs the criteria check, and uploads nothing. |
 | `slancha pending [<s>]` | `GET /api/pending`, or one skill's review card |
 | `slancha review <s>` | the review card, `GET /api/evidence/<s>` and every changed component's diff, page by page; `--json` prints `{"card", "evidence", "diffs"}`. Read-only. |
 | `slancha jobs [--skill S]` | `GET /api/jobs` |
@@ -132,11 +132,14 @@ above, and an error is `{"error": "<message>", "status": <HTTP status or null>}`
 | 0 | done |
 | 1 | an error or a refusal, including a job that `--wait` saw fail or be cancelled, and an upload whose security scan did not start (it is stored: run `slancha scan <s> --wait`, not another upload) |
 | 2 | a usage error |
-| 3 | the acceptance criteria are not met: `criteria --check` or `--revision` failed, an upload missed them (it is stored, but cannot be approved), or the API answered 409 `acceptance criteria not met: ...` |
+| 3 | the acceptance criteria are not met: `criteria --check` or `--revision` failed, an upload missed them (it is stored, but cannot be approved), or the API answered 409 `acceptance criteria not met: ...`. `upload` of several skills exits 3 when any one of them does, even if another skill also failed |
 
 Check a package with `slancha criteria <s> --check <dir>` before uploading it: a skill takes no
-other upload while a change waits for review. The plugin's `slancha` skill tells Claude Code the
-same.
+other upload while a change waits for review, and the CLI says so (it does not send the upload).
+`slancha upload` keeps going after a failure and prints one result per skill. With one skill path,
+`--json` is the API's object; with more than one, or a folder of skills, it is an array of
+`{path, skill, exit, uploaded, result|error}`. A single `--dry-run` prints one object with
+`dry_run` and `criteria`. The plugin's `slancha` skill tells Claude Code the same.
 
 ## Install
 

@@ -17,7 +17,8 @@ From a terminal, to set up a machine (install.sh runs both, without --tracing):
 
 and, with an agent token (slancha auth --manage), the library for a person or a coding agent:
 whoami, skills, skill, upload, pending, review, jobs, job, scan, draft, outcomes and criteria,
-each with --json. Exit codes: 0 done, 1 an error or refusal, 2 usage, 3 acceptance criteria not
+each with --json. `upload` takes one skill, several, or a folder of them, and `--dry-run` checks
+without uploading. Exit codes: 0 done, 1 an error or refusal, 2 usage, 3 acceptance criteria not
 met. Approving, rejecting, rolling back and setting criteria stay with people in the console.
 
 The token is a personal token from the Slancha console, read from SLANCHA_TOKEN or from
@@ -98,6 +99,10 @@ SETUP = ("Create a personal token in the Slancha console (Claude Code page), the
 
 class SlanchaError(Exception):
     """A problem to report to the user; the message is safe to print."""
+
+
+class UsageError(SlanchaError):
+    """The command line is wrong. Exit 2, and do not start the work."""
 
 
 class Offline(SlanchaError):
@@ -665,7 +670,8 @@ def update_one(cfg: Config, skill: Installed, row: dict | None, dry_run: bool,
     name, where = skill.name, shown(skill.root)
     revision = published(row)
     if revision is None:
-        state = "not in your Slancha library" if row is None else "not published"
+        state = ("not in your Slancha library" if row is None else
+                 "not published yet (it is waiting for review in the console)")
         return f"{name}: {state}; left as it is ({where})."
     if revision == skill.revision:
         return f"{name}: up to date ({short(revision)})."
@@ -1987,10 +1993,46 @@ def wait_job(cfg: Config, job: dict, quiet: bool) -> dict:
     return job
 
 
+def _zip_path(name: str) -> None:
+    """Refuse a zip entry that is absolute or climbs out of the skill folder."""
+    text = name[:-1] if name.endswith("/") else name
+    if not text or "\\" in text or text.startswith("/") or any(part in ("", ".", "..")
+                                                              for part in text.split("/")):
+        raise SlanchaError(f"{name!r} leaves the skill's folder; a skill holds no such path.")
+
+
+def check_zip(path: Path, where: str) -> None:
+    """The same limits as a directory upload, read from the zip's central directory."""
+    try:
+        bundle = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        raise SlanchaError(f"{where} is not a zip file.") from None
+    files, total = 0, 0
+    with bundle:
+        for info in bundle.infolist():
+            name = info.filename
+            _zip_path(name)
+            if name.endswith("/") or info.is_dir():
+                continue
+            kind = stat.S_IFMT(info.external_attr >> 16)
+            if kind not in (0, stat.S_IFREG) or info.flag_bits & 0x1:
+                raise SlanchaError(f"{name} is a link; a skill holds plain files only.")
+            files += 1
+            size = info.file_size
+            total += size
+            if files > MAX_FILES or size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+                raise SlanchaError(f"{where} is too large at {name}: a skill has at most "
+                                   f"{MAX_FILES} files, {MAX_FILE_BYTES} bytes each and "
+                                   f"{MAX_TOTAL_BYTES} in all.")
+    if files == 0:
+        raise SlanchaError(f"{where} holds no files.")
+
+
 def package(where: str) -> tuple[dict, list[str]]:
     """The upload body for a skill: a directory of text files, or a .zip as it is. Hidden files,
-    __pycache__ and an installed copy's slancha-manifest.json are left out (the server refuses
-    them); the rest is checked only as far as a clear message needs, the server checks it all."""
+    __pycache__ and an installed copy's slancha-manifest.json are left out of a directory (the
+    server refuses them). A zip is sent unchanged, after the same limits: 200 files, 256 KB each,
+    2 MB in all, no links, and no path that leaves the skill's folder."""
     path = Path(where).expanduser()
     if path.is_file():
         if path.suffix.lower() != ".zip":
@@ -1999,6 +2041,7 @@ def package(where: str) -> tuple[dict, list[str]]:
         if path.stat().st_size > MAX_ZIP_BYTES:
             raise SlanchaError(f"{where} is larger than {MAX_ZIP_BYTES} bytes, the most Slancha "
                                "takes.")
+        check_zip(path, where)
         return {"archive": base64.b64encode(path.read_bytes()).decode("ascii")}, []
     if not path.is_dir():
         raise SlanchaError(f"{where} is neither a directory nor a .zip file.")
@@ -2106,17 +2149,162 @@ def skill(cfg: Config, args):
     return {"versions": versions, "criteria": criteria}, lines + criteria_lines(criteria), 0
 
 
-def upload(cfg: Config, args):
-    body, left_out = package(args.path)
-    if args.name:
-        body["name"] = args.name
-    doc = api_object(cfg, "POST", "/api/skills/upload", body=body, timeout=120)
+def name_in_text(text: str) -> str | None:
+    """The frontmatter `name` of a SKILL.md, when it is a skill name."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:60]:
+        if line.strip() == "---":
+            break
+        found = re.match(r"name:\s*['\"]?([^'\"#]+?)['\"]?\s*$", line)
+        if found and valid_name(found.group(1).strip()):
+            return found.group(1).strip()
+    return None
+
+
+def zip_identity(path: Path) -> tuple[str | None, str | None]:
+    """(single top folder, SKILL.md frontmatter name) of a zip, either of which may be missing.
+    The upload endpoint uses `--name`, else that top folder, else the frontmatter name."""
+    try:
+        with zipfile.ZipFile(path) as bundle:
+            names = [n for n in bundle.namelist() if n and not n.endswith("/")]
+            tops = {n.split("/", 1)[0] for n in names}
+            folder = next(iter(tops)) if len(tops) == 1 and all("/" in n for n in names) else None
+            if folder and not valid_name(folder):
+                folder = None
+            chosen = sorted((n for n in names if n == "SKILL.md" or n.endswith("/SKILL.md")),
+                            key=lambda n: (n.count("/"), len(n)))
+            text = bundle.read(chosen[0]).decode("utf-8") if chosen else ""
+    except (zipfile.BadZipFile, OSError, UnicodeDecodeError, KeyError):
+        return None, None
+    return folder, name_in_text(text) if text else None
+
+
+def implied_name(where: str, body: dict) -> str | None:
+    """The name an upload would be stored under: a directory's SKILL.md, or a zip's single top
+    folder and, when it has none, its SKILL.md. That is the order POST /api/skills/upload uses."""
+    if "files" in body:
+        text = next((f["content"] for f in body["files"]
+                     if isinstance(f, dict) and f.get("path") == "SKILL.md"
+                     and isinstance(f.get("content"), str)), None)
+        return name_in_text(text) if text else None
+    folder, front = zip_identity(Path(where).expanduser())
+    return folder or front
+
+
+def pending_message(name: str | None) -> str:
+    """What to say when a skill already has a change waiting: the next upload is refused."""
+    if name:
+        return (f"{name}: a change is already waiting for review, so it takes no other upload "
+                f"until that change is approved or rejected. slancha pending {name} shows it.")
+    return ("A change is already waiting for review, so this skill takes no other upload until "
+            "that change is approved or rejected. slancha pending <skill> shows it.")
+
+
+def _pending_conflict(exc: ApiError) -> bool:
+    return (exc.status == 409 and "waiting for review" in exc.detail.lower()
+            and not exc.detail.startswith(CRITERIA_UNMET))
+
+
+class _Pending:
+    """Skills that already have a change waiting, fetched once and extended as this run stores."""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.known: set[str] | None = None
+        self.extra: set[str] = set()
+        self.unreachable = False
+
+    def waiting(self, name: str) -> bool:
+        if name in self.extra:
+            return True
+        if self.known is None:
+            try:
+                rows = api_rows(self.cfg, "/api/pending")
+            except SlanchaError:
+                self.known, self.unreachable = set(), True
+            else:
+                self.known = {row["skill"] for row in rows if isinstance(row.get("skill"), str)}
+        return False if self.unreachable else name in (self.known or set())
+
+    def mark(self, name: str) -> None:
+        self.extra.add(name)
+
+
+@dataclass
+class _Target:
+    path: str
+    error: str | None = None
+    collected: bool = False
+
+
+@dataclass
+class _Outcome:
+    path: str
+    skill: str | None
+    code: int
+    lines: list[str]
+    doc: dict | None = None
+    error: str | None = None
+    status: int | None = None
+    uploaded: bool = False
+    left_out: list[str] | None = None
+    dry_run: bool = False
+    pending: bool = False
+
+
+def _collection(path: Path) -> tuple[list[Path], list[str]]:
+    """Child skill directories and zips, and the names of everything else that was skipped."""
+    skills, skipped = [], []
+    for child in sorted(path.iterdir(), key=lambda item: item.name):
+        if child.name.startswith("."):
+            continue
+        if child.is_dir() and (child / "SKILL.md").is_file():
+            skills.append(child)
+        elif child.is_file() and child.suffix.lower() == ".zip":
+            skills.append(child)
+        else:
+            skipped.append(child.name + ("/" if child.is_dir() else ""))
+    return skills, skipped
+
+
+def resolve_uploads(paths: list[str]) -> tuple[list[_Target], list[str]]:
+    """Each path is one skill, unless it is a directory with no SKILL.md: then it is a folder of
+    skill directories and zips, one skill each. Hidden children are ignored."""
+    targets, notes = [], []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if not (path.is_dir() and not (path / "SKILL.md").is_file()):
+            targets.append(_Target(raw))
+            continue
+        try:
+            children, skipped = _collection(path)
+        except OSError as exc:
+            targets.append(_Target(raw, error=f"{raw}: cannot read it ({exc.strerror or exc}).",
+                                   collected=True))
+            continue
+        if skipped:
+            shown = ", ".join(skipped[:10])
+            if len(skipped) > 10:
+                shown += f" and {len(skipped) - 10} more"
+            notes.append(f"Skipped in {raw} (not a skill folder or .zip): {shown}.")
+        if not children:
+            targets.append(_Target(raw, error=(
+                f"{raw} has no skill to upload. Pass a skill directory (SKILL.md at its top) or a "
+                ".zip of one, or a folder whose children are those."), collected=True))
+        else:
+            targets.extend(_Target(str(child), collected=True) for child in children)
+    return targets, notes
+
+
+def _upload_lines(doc: dict, left_out: list[str], as_json: bool) -> tuple[list[str], int]:
     criteria = doc.get("criteria")
     unmet = isinstance(criteria, dict) and criteria.get("ok") is False
     gate = doc.get("gate")
     if unmet and isinstance(gate, dict):           # as the API does, should it not have
         gate = {**gate, "promotable": False}
-    lines = left_out_line(left_out, args.json) + [
+    lines = left_out_line(left_out, as_json) + [
         f"Uploaded {printable(doc.get('skill'), 64)}: revision {rev(doc.get('revision'))}, "
         f"proposal {printable(doc.get('proposal_id'), 80)} ({printable(doc.get('kind'), 20)}). "
         "It waits for a person to review it in the console."]
@@ -2135,7 +2323,146 @@ def upload(cfg: Config, args):
         lines.append("The change is stored but cannot be approved until it meets the acceptance "
                      "criteria, and no other upload of the skill is taken until a person rejects "
                      "it. Check a package first: slancha criteria <skill> --check <path>.")
-    return doc, lines, CRITERIA_FAILED if unmet else 1 if scan_error else 0
+    return lines, CRITERIA_FAILED if unmet else 1 if scan_error else 0
+
+
+def propose(cfg: Config, where: str, name: str | None, as_json: bool,
+            waiting: _Pending) -> tuple[dict, list[str], int, list[str], str | None]:
+    """Upload one skill. The name is `--name` or the one the package implies."""
+    body, left_out = package(where)
+    if name:
+        body["name"] = name
+    skill = name or implied_name(where, body)
+    if skill and waiting.waiting(skill):
+        raise ApiError(409, pending_message(skill), "a change is already waiting for review")
+    try:
+        doc = api_object(cfg, "POST", "/api/skills/upload", body=body, timeout=120)
+    except ApiError as exc:
+        if _pending_conflict(exc):
+            raise ApiError(409, pending_message(skill), exc.detail) from None
+        raise
+    lines, code = _upload_lines(doc, left_out, as_json)
+    stored = doc.get("skill") if isinstance(doc.get("skill"), str) else skill
+    return doc, lines, code, left_out, stored if isinstance(stored, str) else None
+
+
+def dry_run_one(cfg: Config, where: str, name: str | None, waiting: _Pending) -> _Outcome:
+    """Package and validate locally, then check acceptance criteria. Nothing is uploaded."""
+    body, left_out = package(where)
+    skill = name or implied_name(where, body)
+    lines = left_out_line(left_out, False)
+    pending = bool(skill and waiting.waiting(skill))
+    if pending:
+        lines.append(pending_message(skill) + " An upload would be refused.")
+    if not skill:
+        message = ("Could not read a skill name from SKILL.md, so the acceptance criteria were "
+                   "not checked. Name it in the frontmatter, or pass --name with one skill.")
+        lines.append(message)
+        return _Outcome(where, None, 1, lines, error=message, left_out=left_out, dry_run=True,
+                        pending=pending)
+    try:
+        doc = api_object(cfg, "POST", f"/api/skills/{skill}/criteria/check", body=body, timeout=60)
+    except ApiError as exc:
+        code = CRITERIA_FAILED if exc.status == 409 and exc.detail.startswith(CRITERIA_UNMET) \
+            else 1
+        lines.append(str(exc))
+        return _Outcome(where, skill, code, lines, error=str(exc), status=exc.status,
+                        left_out=left_out, dry_run=True, pending=pending)
+    lines += evaluation_lines(doc, f"{where} against the acceptance criteria of {skill}")
+    unmet = isinstance(doc, dict) and doc.get("ok") is False
+    code = CRITERIA_FAILED if unmet else 1 if pending else 0
+    return _Outcome(where, skill, code, lines, doc=doc, left_out=left_out, dry_run=True,
+                    pending=pending)
+
+
+def _outcome_json(row: _Outcome) -> dict:
+    doc = {"path": row.path, "skill": row.skill, "exit": row.code, "dry_run": row.dry_run,
+           "uploaded": row.uploaded}
+    if row.left_out:
+        doc["left_out"] = row.left_out
+    if row.pending:
+        doc["pending"] = True
+    if row.error:
+        doc["error"] = row.error
+        doc["status"] = row.status
+    if row.doc is not None:
+        doc["criteria" if row.dry_run else "result"] = row.doc
+    return doc
+
+
+def _worst(rows: list[_Outcome]) -> int:
+    """3 when any skill misses its acceptance criteria, else 1 when any failed, else 0."""
+    if any(row.code == CRITERIA_FAILED for row in rows):
+        return CRITERIA_FAILED
+    if any(row.code != 0 for row in rows):
+        return 1
+    return 0
+
+
+def _batch_lines(rows: list[_Outcome], notes: list[str], dry_run: bool) -> list[str]:
+    lines = ["Dry run: nothing is uploaded."] if dry_run else []
+    lines += notes
+    for row in rows:
+        lines.append(f"{row.skill or row.path} ({row.path}):")
+        lines += [f"  {line}" if line else "" for line in row.lines]
+    ok = sum(row.code == 0 for row in rows)
+    missed = sum(row.code == CRITERIA_FAILED for row in rows)
+    failed = sum(row.code not in (0, CRITERIA_FAILED) for row in rows)
+    count = len(rows)
+    lines.append(f"{count} skill{'s' if count != 1 else ''}: {ok} ok, "
+                 f"{missed} failed acceptance criteria, {failed} failed."
+                 + (" Nothing was uploaded." if dry_run else ""))
+    return lines
+
+
+def _caught(where: str, exc: SlanchaError) -> _Outcome:
+    status = exc.status if isinstance(exc, ApiError) else None
+    code = CRITERIA_FAILED if isinstance(exc, ApiError) and exc.status == 409 \
+        and exc.detail.startswith(CRITERIA_UNMET) else 1
+    return _Outcome(where, None, code, [str(exc)], error=str(exc), status=status)
+
+
+def upload(cfg: Config, args):
+    targets, notes = resolve_uploads(args.paths)
+    ready = [target for target in targets if target.error is None]
+    if args.name and len(ready) > 1:
+        raise UsageError("--name names one skill; "
+                         f"{len(ready)} were given. Pass a single skill, or omit --name and let "
+                         "each SKILL.md name it.")
+    waiting = _Pending(cfg)
+    one = (not args.dry_run and len(targets) == 1 and targets[0].error is None
+           and not targets[0].collected)
+    if one:
+        doc, lines, code, _, _ = propose(cfg, targets[0].path, args.name, args.json, waiting)
+        return doc, lines, code
+    rows: list[_Outcome] = []
+    for target in targets:
+        if target.error:
+            rows.append(_Outcome(target.path, None, 1, [target.error], error=target.error))
+            continue
+        try:
+            if args.dry_run:
+                rows.append(dry_run_one(cfg, target.path, args.name, waiting))
+            else:
+                doc, lines, code, left_out, skill = propose(cfg, target.path, args.name, False,
+                                                           waiting)
+                uploaded = isinstance(doc, dict) and bool(doc.get("proposal_id"))
+                if uploaded and skill:
+                    waiting.mark(skill)
+                rows.append(_Outcome(target.path, skill, code, lines, doc=doc, left_out=left_out,
+                                     uploaded=uploaded))
+        except SlanchaError as exc:
+            rows.append(_caught(target.path, exc))
+    if args.json:
+        for row in rows:
+            left_out_line(row.left_out or [], True)
+        for note in notes:
+            print(note, file=sys.stderr)
+        notes = []
+    as_array = any(target.collected for target in targets) or len(rows) != 1
+    payload = [_outcome_json(row) for row in rows]
+    return (payload if as_array else payload[0]), _batch_lines(rows, notes, args.dry_run), \
+        _worst(rows)
 
 
 def review_card(cfg: Config, name: str) -> dict:
@@ -2216,9 +2543,17 @@ def review(cfg: Config, args):
     return {"card": card, "evidence": evidence, "diffs": diffs}, lines, 0
 
 
+def _newest_first(row: dict):
+    """Sort key: a created_at, newest first; rows without one keep their order at the end."""
+    at = row.get("created_at")
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        return (0, -float(at))
+    return (1, 0.0)
+
+
 def jobs(cfg: Config, args):
     query = "?" + urllib.parse.urlencode({"skill": args.skill}) if args.skill else ""
-    rows = api_rows(cfg, f"/api/jobs{query}")
+    rows = sorted(api_rows(cfg, f"/api/jobs{query}"), key=_newest_first)
     return rows, [f"  {job_line(j)}" for j in rows] or ["No jobs yet."], 0
 
 
@@ -2301,8 +2636,10 @@ and /slancha:status run.
 
 Exit codes: 0 done, 1 an error or a refusal, 2 a usage error, 3 the acceptance criteria are not
 met, 130 stopped with Ctrl-C. An upload that exits 1 or 3 after its Uploaded line is stored:
-do not upload it again. --json prints the API's JSON (or the documented wrapper) on stdout;
-an error then prints {"error": "<message>", "status": <HTTP status or null>}.
+do not upload it again. Several skills exit 3 if any miss the criteria, else 1 if any failed.
+--json prints the API's JSON (or the documented wrapper) on stdout; with more than one skill,
+or a folder of them, upload prints an array of per-skill results. An error prints
+{"error": "<message>", "status": <HTTP status or null>}.
 
 Approving, rejecting and rolling back changes, and setting acceptance criteria, are for people
 in the Slancha console; no command here does them."""
@@ -2396,15 +2733,36 @@ def cli(argv: list[str]) -> int:
             named=False)
     command("skills", skills, "the skills in your library", named=False)
     command("skill", skill, "a skill's served revision, publications and acceptance criteria")
-    sub = command("upload", upload, "propose a skill: a directory of text files or a .zip",
-                  "Uploads a skill as a change waiting for review, and starts its security scan. "
-                  "Exit 3 when it does not meet the skill's acceptance criteria: it is stored, but "
-                  "cannot be approved. Check first with slancha criteria <skill> --check <path>. "
-                  "Exit 1 after the Uploaded line when its scan did not start: it is stored, so "
-                  "do not upload it again; slancha scan <skill> --wait starts the scan.",
+    sub = command("upload", upload, "propose one or more skills for review",
+                  "Uploads each skill as its own change waiting for review, and starts its "
+                  "security scan. Pass skill directories (SKILL.md at the top), .zip files, or "
+                  "both. A directory with no SKILL.md is a folder of skills: each child directory "
+                  "that has SKILL.md, and each .zip, is one skill (hidden children are ignored; "
+                  "other children are skipped and named). One failure does not stop the rest.\n\n"
+                  "The command exits 3 if any skill misses its acceptance criteria, 1 if any other "
+                  "skill fails, and 0 only when every skill succeeds. --name names a single skill "
+                  "and is refused when more than one skill is given. --dry-run packages and "
+                  "validates each skill locally (200 files, 256 KB each, 2 MB, no links, no path "
+                  "that leaves the folder) and checks acceptance criteria the way "
+                  "`slancha criteria <skill> --check` does; it uploads nothing.\n\n"
+                  "A skill that already has a change waiting takes no other upload until that "
+                  "change is approved or rejected. With one skill path, --json prints the API's "
+                  "object. With more than one skill, or a folder of them, --json prints an array "
+                  "of per-skill results (path, skill, exit, uploaded, and result or error). "
+                  "A --dry-run of one skill prints one object with dry_run and criteria.\n\n"
+                  "Exit 3 when a stored skill misses its acceptance criteria: it cannot be "
+                  "approved. Exit 1 after the Uploaded line when its scan did not start: it is "
+                  "stored, so do not upload it again; slancha scan <skill> --wait starts the scan.",
                   named=False)
-    sub.add_argument("path", help="the skill's directory (SKILL.md at its top) or a .zip of it")
-    sub.add_argument("--name", type=skill_arg, help="the skill's name (default: SKILL.md's)")
+    sub.add_argument("paths", nargs="+", metavar="path",
+                     help="a skill directory or .zip, or a folder of them; repeat for several")
+    sub.add_argument("--name", type=skill_arg,
+                     help="the skill's name, only when exactly one skill is given "
+                          "(default: a directory's SKILL.md name; a zip's single top folder, "
+                          "else its SKILL.md name)")
+    sub.add_argument("--dry-run", action="store_true",
+                     help="package and validate each skill and check its acceptance criteria; "
+                          "upload nothing")
     sub = command("pending", pending, "the changes waiting for review, or one skill's review card",
                   named=False)
     sub.add_argument("skill", nargs="?", type=skill_arg, help="show this skill's review card")
@@ -2481,6 +2839,12 @@ def cli(argv: list[str]) -> int:
             "Stopped waiting; the job goes on (slancha jobs lists it)."
             if getattr(args, "wait", False) else "Stopped.")
         return 130
+    except UsageError as exc:
+        if as_json:
+            print(json.dumps({"error": str(exc), "status": None}))
+        else:
+            say(str(exc))
+        return 2
     except SlanchaError as exc:
         if as_json:
             print(json.dumps({"error": str(exc), "status": getattr(exc, "status", None)}))

@@ -181,6 +181,13 @@ class UpdateTests(PluginCase):
                               "uses_7d": 0})
         self.assertIn("fresh: not published yet", self.run_script("update", "fresh"))
         self.assertIn("nope: not in your Slancha library", self.run_script("update", "nope"))
+        self.install_v1()
+        del self.api.published["demo"]
+        self.api.rows.append({"name": "demo", "description": "", "revision": "", "active": False,
+                              "updated_at": 1.0, "pending": True, "pending_kind": "update",
+                              "uses_7d": 0})
+        self.assertIn("demo: not published yet (it is waiting for review in the console)",
+                      self.run_script("update"))
 
     def test_unmanaged_directory_is_not_replaced_without_force(self):
         self.api.publish("demo", V1)

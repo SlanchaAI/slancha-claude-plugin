@@ -10,6 +10,7 @@ import difflib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -320,9 +321,13 @@ class JobTests(AgentCase):
     def test_jobs_and_one_job(self):
         self.api.start_job("scan", "demo", self.v1)
         self.api.start_job("draft", "other", "0" * 64)
+        self.api.jobs["job_1"]["created_at"] = 100
+        self.api.jobs["job_2"]["created_at"] = 200
         out = self.slancha("jobs")
+        self.assertLess(out.index("job_2"), out.index("job_1"))
         self.assertIn(f"  job_1  scan  demo  {self.v1[:12]}  queued", out)
         self.assertIn("  job_2  draft  other", out)
+        self.assertEqual([j["id"] for j in self.as_json("jobs")], ["job_2", "job_1"])
         self.assertEqual([j["id"] for j in self.as_json("jobs", "--skill", "demo")], ["job_1"])
         self.assertIn("No jobs yet.", self.slancha("jobs", "--skill", "nope"))
         self.assertIn("Job job_1  scan  demo", self.slancha("job", "job_1"))   # running
@@ -385,6 +390,266 @@ class DraftAndOutcomesTests(AgentCase):
         self.assertEqual(self.as_json("outcomes", "demo")["sessions"], 5)
         out = self.slancha("outcomes", "demo", "--start")
         self.assertIn("Job job_1  outcomes  demo", out)
+
+
+def _skill_files(name: str, complete: bool = True) -> dict:
+    files = {"SKILL.md": f"---\nname: {name}\ndescription: A demo skill.\n---\n"
+                         "## When to use\nAlways, for the demo.\n"}
+    if complete:
+        files["scripts/run.sh"] = "echo hi\n"
+    return files
+
+
+class BulkUploadTests(AgentCase):
+    """Several skills in one `slancha upload`: each is its own proposal, and the run continues."""
+
+    def write_skill(self, root: Path, name: str, complete: bool = True) -> Path:
+        dest = root / name
+        for path, text in _skill_files(name, complete).items():
+            target = dest / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        self.api.criteria[name] = list(RULES)
+        return dest
+
+    def zip_skill(self, dest: Path, name: str, complete: bool = True) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(dest, "w") as bundle:
+            for path, text in _skill_files(name, complete).items():
+                bundle.writestr(f"{name}/{path}", text)
+        self.api.criteria[name] = list(RULES)
+        return dest
+
+    def test_a_folder_of_skills_uploads_each_and_skips_the_rest(self):
+        parent = self.tmp / "library"
+        self.write_skill(parent, "alpha")
+        self.write_skill(parent, "beta")
+        self.zip_skill(parent / "gamma.zip", "gamma")
+        (parent / "README.md").write_text("not a skill\n")
+        (parent / "notes").mkdir()
+        out = self.slancha("upload", str(parent))
+        self.assertEqual(set(self.api.proposals), {"alpha", "beta", "gamma"})
+        self.assertIn("Skipped in", out)
+        self.assertIn("README.md", out)
+        self.assertIn("notes/", out)
+        self.assertIn("3 skills: 3 ok, 0 failed acceptance criteria, 0 failed.", out)
+        self.assertEqual([path for path, _ in self.api.bodies if path == "/api/skills/upload"],
+                         ["/api/skills/upload"] * 3)
+        # a directory that itself has SKILL.md is one skill, nested folders included
+        root = self.write_skill(self.tmp / "src", "parent-skill")
+        (root / "child").mkdir()
+        (root / "child" / "SKILL.md").write_text(_skill_files("child-skill")["SKILL.md"])
+        self.slancha("upload", str(root))
+        self.assertEqual(set(self.api.proposals) - {"alpha", "beta", "gamma"}, {"parent-skill"})
+        self.assertIn("child/SKILL.md", self.api.proposals["parent-skill"]["files"])
+
+    def test_mixed_results_keep_going_and_criteria_set_the_exit_code(self):
+        good = self.write_skill(self.tmp / "src", "good-one")
+        bad = self.write_skill(self.tmp / "src", "bad-one", complete=False)
+        out = self.slancha("upload", str(good), str(bad), "/no/such/skill", code=3)
+        self.assertIn("Uploaded good-one", out)
+        self.assertIn("Uploaded bad-one", out)
+        self.assertIn("fails 1 of 2", out)
+        self.assertIn("neither a directory nor a .zip", out)
+        self.assertIn("3 skills: 1 ok, 1 failed acceptance criteria, 1 failed.", out)
+        self.assertEqual(set(self.api.proposals), {"good-one", "bad-one"})
+        other = self.write_skill(self.tmp / "src", "json-good")
+        missed = self.write_skill(self.tmp / "src", "json-bad", complete=False)
+        doc = self.as_json("upload", str(other), str(missed), "/also/missing", code=3)
+        self.assertEqual([row["exit"] for row in doc], [0, 3, 1])
+        self.assertTrue(doc[0]["uploaded"])
+        self.assertIn("proposal_id", doc[0]["result"])
+        self.assertTrue(doc[1]["uploaded"])
+        self.assertFalse(doc[1]["result"]["criteria"]["ok"])
+        self.assertFalse(doc[2]["uploaded"])
+        self.assertIsNone(doc[2]["status"])
+
+    def test_pending_is_reported_and_does_not_stop_the_others(self):
+        good = self.write_skill(self.tmp / "src", "good-one")
+        self.slancha("upload", str(good))
+        other = self.write_skill(self.tmp / "src", "other-one")
+        out = self.slancha("upload", str(good), str(other), code=1)
+        self.assertIn("good-one: a change is already waiting for review, so it takes no other "
+                      "upload until that change is approved or rejected. "
+                      "slancha pending good-one shows it.", out)
+        self.assertIn("Uploaded other-one", out)
+        self.assertEqual(set(self.api.proposals), {"good-one", "other-one"})
+        # two copies of the same skill in one command: the second finds the first
+        first = self.write_skill(self.tmp / "src", "dup-skill")
+        second = self.tmp / "src" / "dup-copy"
+        second.mkdir()
+        for path, text in _skill_files("dup-skill").items():
+            target = second / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        out = self.slancha("upload", str(first), str(second), code=1)
+        self.assertEqual(out.count("Uploaded dup-skill"), 1)
+        self.assertIn("dup-skill: a change is already waiting for review", out)
+        dup_uploads = [body for path, body in self.api.bodies if path == "/api/skills/upload"
+                       and any(isinstance(f, dict) and "name: dup-skill" in str(f.get("content"))
+                               for f in body.get("files") or [])]
+        self.assertEqual(len(dup_uploads), 1)
+
+    def test_json_array_dry_run_and_name_refused_for_many(self):
+        good = self.write_skill(self.tmp / "src", "good-one")
+        bad = self.write_skill(self.tmp / "src", "bad-one", complete=False)
+        out = self.slancha("upload", "--dry-run", str(good), str(bad), code=3)
+        self.assertIn("Dry run: nothing is uploaded.", out)
+        self.assertIn(f"{good} against the acceptance criteria of good-one: meets all 2", out)
+        self.assertIn("fails 1 of 2", out)
+        self.assertIn("Nothing was uploaded.", out)
+        self.assertEqual(self.api.proposals, {})
+        self.assertFalse([path for path, _ in self.api.bodies if path == "/api/skills/upload"])
+        checks = [path for path, _ in self.api.bodies if path.endswith("/criteria/check")]
+        self.assertEqual(checks, ["/api/skills/good-one/criteria/check",
+                                  "/api/skills/bad-one/criteria/check"])
+        doc = self.as_json("upload", "--dry-run", str(good), str(bad), code=3)
+        self.assertEqual([(row["skill"], row["exit"], row["dry_run"], row["uploaded"],
+                           row["criteria"]["ok"]) for row in doc],
+                         [("good-one", 0, True, False, True), ("bad-one", 3, True, False, False)])
+        one = self.as_json("upload", str(good), "--dry-run")
+        self.assertIsInstance(one, dict)
+        self.assertEqual((one["dry_run"], one["skill"], one["criteria"]["ok"], one["exit"]),
+                         (True, "good-one", True, 0))
+        self.assertEqual(self.api.proposals, {})
+        out = self.slancha("upload", "--name", "good-one", str(good), str(bad), code=2)
+        self.assertIn("--name names one skill; 2 were given", out)
+        self.assertEqual(self.api.proposals, {})
+        err = self.as_json("upload", "--name", "good-one", str(good), str(bad), code=2)
+        self.assertEqual(set(err), {"error", "status"})
+        self.assertIsNone(err["status"])
+        # one skill in a folder is still a batch: --json is an array, and --name applies
+        parent = self.tmp / "only"
+        self.write_skill(parent, "alpha")
+        named = self.as_json("upload", "--name", "renamed-skill", str(parent))
+        self.assertIsInstance(named, list)
+        self.assertEqual(named[0]["skill"], "renamed-skill")
+        self.assertEqual(set(self.api.proposals), {"renamed-skill"})
+        help_text = " ".join(self.slancha("upload", "--help").split())
+        self.assertIn("--dry-run", help_text)
+        self.assertIn("folder of skills", help_text)
+        self.assertIn("200 files", help_text)
+
+    def test_dry_run_reports_a_pending_skill_and_a_bad_package_without_uploading(self):
+        good = self.write_skill(self.tmp / "src", "good-one")
+        self.slancha("upload", str(good))
+        out = self.slancha("upload", "--dry-run", str(good), code=1)
+        self.assertIn("already waiting for review", out)
+        self.assertIn("An upload would be refused", out)
+        self.assertIn("Nothing was uploaded.", out)
+        self.assertEqual(set(self.api.proposals), {"good-one"})
+        self.assertTrue(any(path.endswith("/criteria/check") for path, _ in self.api.bodies))
+        messy = self.write_skill(self.tmp / "src", "messy")
+        (messy / "logo.md").write_bytes(b"\xff\xfe")
+        before = list(self.api.bodies)
+        out = self.slancha("upload", "--dry-run", str(messy), code=1)
+        self.assertIn("logo.md is not UTF-8 text", out)
+        self.assertEqual(self.api.bodies, before)
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.assertIn("has no skill to upload", self.slancha("upload", str(empty), code=1))
+        self.assertIn("neither a directory nor a .zip",
+                      self.slancha("upload", str(self.tmp / "missing.txt"), code=1))
+        (self.tmp / "notes.txt").write_text("hello\n")
+        self.assertIn("not a .zip", self.slancha("upload", str(self.tmp / "notes.txt"), code=1))
+
+    def test_each_skill_keeps_the_upload_limits(self):
+        good = self.write_skill(self.tmp / "src", "good-one")
+        huge = self.write_skill(self.tmp / "src", "huge-one")
+        (huge / "big.md").write_text("x" * (256 * 1024 + 1))
+        linked = self.write_skill(self.tmp / "src", "linked")
+        (linked / "link.md").symlink_to(linked / "SKILL.md")
+        slip = self.tmp / "slip.zip"
+        with zipfile.ZipFile(slip, "w") as bundle:
+            bundle.writestr("../SKILL.md", "x\n")
+        link_zip = self.tmp / "link.zip"
+        info = zipfile.ZipInfo("zip-link.md")
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(link_zip, "w") as bundle:
+            bundle.writestr(info, "SKILL.md")
+        crowded = self.tmp / "crowded.zip"
+        with zipfile.ZipFile(crowded, "w") as bundle:
+            for number in range(201):
+                bundle.writestr(f"f{number}.md", "x\n")
+        out = self.slancha("upload", str(good), str(huge), str(linked), str(slip), str(link_zip),
+                           str(crowded), code=1)
+        self.assertIn("too large at big.md", out)
+        self.assertIn("link.md is a link", out)
+        self.assertIn("../SKILL.md' leaves the skill's folder", out)
+        self.assertIn("zip-link.md is a link", out)
+        self.assertIn("too large at f200.md", out)
+        self.assertEqual(set(self.api.proposals), {"good-one"})
+        self.assertIn("Uploaded good-one", out)
+        self.assertIn("6 skills: 1 ok, 0 failed acceptance criteria, 5 failed.", out)
+
+    def test_a_zip_is_named_by_its_folder_when_skill_md_differs(self):
+        archive = self.tmp / "odd.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("alpha/SKILL.md", _skill_files("beta")["SKILL.md"])
+            bundle.writestr("alpha/scripts/run.sh", "echo hi\n")
+        self.api.criteria["alpha"] = list(RULES)
+        doc = self.as_json("upload", "--dry-run", str(archive))
+        self.assertEqual(doc["skill"], "alpha")
+        self.assertTrue(doc["criteria"]["ok"])
+        self.assertEqual(self.api.proposals, {})
+        self.slancha("upload", str(archive))
+        self.assertEqual(set(self.api.proposals), {"alpha"})
+        self.assertNotIn("beta", self.api.proposals)
+
+
+class DocumentedSurfaceTests(AgentCase):
+    """Every command the install docs name, against the fake API or by its --help."""
+
+    def test_flags_usage_and_a_pass_over_each_command(self):
+        for args in (["--help"], ["auth", "--help"], ["init", "--help"], ["tracing", "--help"],
+                     ["tracing", "status", "--help"], ["tracing", "on", "--help"],
+                     ["tracing", "off", "--help"], ["tracing", "config", "--help"],
+                     ["whoami", "--help"], ["skills", "--help"], ["skill", "--help"],
+                     ["upload", "--help"], ["pending", "--help"], ["review", "--help"],
+                     ["jobs", "--help"], ["job", "--help"], ["scan", "--help"],
+                     ["draft", "--help"], ["outcomes", "--help"], ["criteria", "--help"],
+                     ["update", "--help"], ["status", "--help"], ["uninstall", "--help"]):
+            self.assertIn("usage:", self.slancha(*args).lower())
+        auth = self.slancha("auth", "--help")
+        for flag in ("--manage", "--tracing", "--no-browser", "--api"):
+            self.assertIn(flag, auth)
+        init = self.slancha("init", "--help")
+        self.assertIn("--dry-run", init)
+        self.assertIn("--tracing", init)
+        update = self.slancha("update", "--help")
+        self.assertIn("--dry-run", update)
+        self.assertIn("--force", update)
+        self.assertIn("--max-chars", self.slancha("tracing", "config", "--help"))
+        self.assertIn("--images", self.slancha("tracing", "config", "--help"))
+        self.assertIn("--project", self.slancha("tracing", "on", "--help"))
+        self.assertIn("--json", self.slancha("whoami", "--help"))
+        self.assertIn("--json", self.slancha("tracing", "status", "--help"))
+        for args in (["upload"], ["skill"], ["tracing"], ["job"], ["no-such-command"],
+                     ["criteria", "Demo"], ["scan", "demo", "--revision", "abc"]):
+            self.slancha(*args, code=2)
+        self.assertIn("Example Org", self.slancha("whoami"))
+        self.assertIn("demo", self.slancha("skills"))
+        self.assertIn("serves", self.slancha("skill", "demo"))
+        self.assertIn("Acceptance criteria", self.slancha("criteria", "demo"))
+        self.slancha("outcomes", "demo", code=1)
+        self.slancha("draft", "demo", code=1)
+        self.api.agent_jobs = True
+        self.assertIn("sessions", self.slancha("outcomes", "demo", "--days", "30"))
+        self.slancha("outcomes", "demo", "--start")
+        self.slancha("draft", "demo")
+        self.slancha("scan", "demo")
+        self.assertIn("job_", self.slancha("jobs"))
+        self.slancha("job", next(iter(self.api.jobs)))
+        self.assertIn("API", self.slancha("status"))
+        self.assertIn("No Slancha skills", self.slancha("update"))
+        self.slancha("hook")
+        self.assertIn("nothing to upload", self.slancha("flush"))
+        status = self.slancha("tracing", "status")
+        self.assertIn("On this machine", status)
+        self.assertIn("In your workspace", status)
+        doc = self.as_json("tracing", "status")
+        self.assertIn("local", doc)
+        self.assertIn("workspace", doc)
 
 
 if __name__ == "__main__":
