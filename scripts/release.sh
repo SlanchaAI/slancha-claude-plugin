@@ -17,8 +17,14 @@ case "${1:-}" in
   version)
     version="${2:-}"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 version X.Y.Z" >&2; exit 2; }
-    sed -i -E "s/^VERSION = \"[^\"]*\"/VERSION = \"$version\"/" scripts/slancha.py
-    sed -i -E "s/(\"version\": )\"[^\"]*\"/\1\"$version\"/" .claude-plugin/plugin.json
+    # GNU sed -i and BSD sed -i take different arguments. Write aside and replace; -E is both.
+    rewrite() {
+      tmp="$(mktemp)"
+      sed -E "$1" "$2" >"$tmp"
+      mv "$tmp" "$2"
+    }
+    rewrite "s/^VERSION = \"[^\"]*\"/VERSION = \"$version\"/" scripts/slancha.py
+    rewrite "s/(\"version\": )\"[^\"]*\"/\1\"$version\"/" .claude-plugin/plugin.json
     if ! grep -q "^VERSION = \"$version\"$" scripts/slancha.py \
         || ! grep -q "\"version\": \"$version\"" .claude-plugin/plugin.json; then
       echo "version not set in both files" >&2
@@ -31,7 +37,15 @@ case "${1:-}" in
     git diff --quiet HEAD -- scripts/slancha.py install.sh \
       || { echo "commit scripts/slancha.py and install.sh first: the pin names a commit" >&2; exit 1; }
     ref="$(git rev-parse HEAD)"
-    sha="$(git show "$ref:scripts/slancha.py" | sha256sum | cut -d' ' -f1)"
+    # The same pair install.sh accepts: sha256sum, else shasum -a 256 (macOS).
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha="$(git show "$ref:scripts/slancha.py" | sha256sum | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+      sha="$(git show "$ref:scripts/slancha.py" | shasum -a 256 | cut -d' ' -f1)"
+    else
+      echo "neither sha256sum nor shasum is on PATH" >&2
+      exit 1
+    fi
     sed -e "s/^SLANCHA_REF=.*/SLANCHA_REF=\"$ref\"/" \
         -e "s/^SLANCHA_SHA256=.*/SLANCHA_SHA256=\"$sha\"/" install.sh
     echo "pinned to $ref (slancha.py sha256 $sha); the commit must be on GitHub before anyone runs it" >&2

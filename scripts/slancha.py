@@ -1551,21 +1551,24 @@ def init(dry_run: bool, tracing: bool) -> None:
 
 def unmerge_settings(settings: dict, tracing: dict | None) -> list[str]:
     """Take out of Claude Code's settings in place what merge_settings put in; what changed. A
-    CC_LANGFUSE_* value that is not what tracing.json holds was set by someone else and stays."""
+    CC_LANGFUSE_* value stays unless tracing.json is present and holds that same value."""
     notes = []
     env = settings.get("env")
     if isinstance(env, dict):
         ours = {"CC_LANGFUSE_PUBLIC_KEY": "public_key", "CC_LANGFUSE_SECRET_KEY": "secret_key",
                 "CC_LANGFUSE_BASE_URL": "host"}
         present = [k for k in ours if k in env]
-        removed = [k for k in present if tracing is None or env[k] == tracing.get(ours[k])]
+        # Without tracing.json there is no record of what init wrote, so every key stays.
+        removed = [k for k in present if tracing is not None and env[k] == tracing.get(ours[k])]
         for key in removed:
             del env[key]
         if removed:
             notes.append(f"remove env {', '.join(removed)}")
-        if len(removed) < len(present):
-            notes.append(f"keep env {', '.join(k for k in present if k not in removed)}: not the "
-                         "values slancha init wrote")
+        kept = [k for k in present if k not in removed]
+        if kept:
+            why = ("no tracing.json, so these are left as they are" if tracing is None else
+                   "not the values slancha init wrote")
+            notes.append(f"keep env {', '.join(kept)}: {why}")
     configs = settings.get("pluginConfigs")
     entry = configs.get(LANGFUSE_PLUGIN) if isinstance(configs, dict) else None
     options = entry.get("options") if isinstance(entry, dict) else None
@@ -2015,7 +2018,9 @@ def check_zip(path: Path, where: str) -> None:
             if name.endswith("/") or info.is_dir():
                 continue
             kind = stat.S_IFMT(info.external_attr >> 16)
-            if kind not in (0, stat.S_IFREG) or info.flag_bits & 0x1:
+            if info.flag_bits & 0x1:
+                raise SlanchaError(f"{name} is encrypted; a skill holds plain files only.")
+            if kind not in (0, stat.S_IFREG):
                 raise SlanchaError(f"{name} is a link; a skill holds plain files only.")
             files += 1
             size = info.file_size
@@ -2579,7 +2584,10 @@ def scan(cfg: Config, args):
 def draft(cfg: Config, args):
     body = {"acknowledge": DRAFT_NOTICE}       # the admin's workspace opt-in is the consent
     if args.new:
-        if published(fetch_library(cfg).get(args.skill)):
+        # api_rows reports a missing token; fetch_library would call the API with none.
+        rows = {row["name"]: row for row in api_rows(cfg, "/api/skills")
+                if isinstance(row.get("name"), str)}
+        if published(rows.get(args.skill)):
             raise SlanchaError(f"{args.skill} is already served; without --new, draft improves "
                                "it from the sessions that used it.")
         body["project"] = args.project

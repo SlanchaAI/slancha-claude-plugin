@@ -379,6 +379,23 @@ class DraftAndOutcomesTests(AgentCase):
         self.assertIn("workspace's own OpenAI key", help_text)
         self.assertIn("An admin must first let agent tokens start", help_text)
 
+    def test_draft_new_without_a_token_says_so(self):
+        env = {k: v for k, v in self.env.items() if k != "SLANCHA_TOKEN"}
+        result = subprocess.run([sys.executable, str(SCRIPT), "draft", "fresh", "--new",
+                                 "--project", "/work"], text=True, stdin=subprocess.DEVNULL,
+                                capture_output=True, env=env, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("No Slancha token yet", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        env["SLANCHA_TOKEN"] = AGENT_TOKEN
+        env["SLANCHA_API_URL"] = "not a url"
+        result = subprocess.run([sys.executable, str(SCRIPT), "draft", "fresh", "--new",
+                                 "--project", "/work"], text=True, stdin=subprocess.DEVNULL,
+                                capture_output=True, env=env, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("must be an https:// URL", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_outcomes(self):
         self.slancha("outcomes", "demo", code=1)                # the admin's opt-in, again
         self.api.agent_jobs = True
@@ -581,6 +598,18 @@ class BulkUploadTests(AgentCase):
         self.assertEqual(set(self.api.proposals), {"good-one"})
         self.assertIn("Uploaded good-one", out)
         self.assertIn("6 skills: 1 ok, 0 failed acceptance criteria, 5 failed.", out)
+        secret = self.tmp / "secret.zip"
+        with zipfile.ZipFile(secret, "w") as bundle:
+            bundle.writestr("secret.md", "secret\n")
+        # ZipFile clears the encryption flag on write, so set bit 0 in both headers.
+        raw = bytearray(secret.read_bytes())
+        raw[6] |= 0x1
+        central = raw.find(b"PK\x01\x02")
+        raw[central + 8] |= 0x1
+        secret.write_bytes(raw)
+        encrypted = self.slancha("upload", str(secret), code=1)
+        self.assertIn("secret.md is encrypted", encrypted)
+        self.assertNotIn("is a link", encrypted)
 
     def test_a_zip_is_named_by_its_folder_when_skill_md_differs(self):
         archive = self.tmp / "odd.zip"

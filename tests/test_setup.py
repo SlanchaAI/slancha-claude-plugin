@@ -533,6 +533,16 @@ class UninstallTests(InitCase):
             self.assertTrue(kept.exists(), kept)
         self.assertEqual(len(json.loads((self.home / "fake-claude.json").read_text())["plugins"]), 2)
 
+    def test_without_tracing_json_the_langfuse_keys_stay(self):
+        self.installed()
+        (self.config / "tracing.json").unlink()
+        out = self.run_script("uninstall")
+        env = json.loads(self.settings.read_text())["env"]
+        self.assertEqual(set(env), {"FOO", "CC_LANGFUSE_PUBLIC_KEY", "CC_LANGFUSE_SECRET_KEY",
+                                    "CC_LANGFUSE_BASE_URL"})
+        self.assertIn("keep env CC_LANGFUSE_PUBLIC_KEY, CC_LANGFUSE_SECRET_KEY, "
+                      "CC_LANGFUSE_BASE_URL: no tracing.json, so these are left as they are", out)
+
     def test_a_langfuse_key_someone_else_set_stays(self):
         self.installed()
         settings = json.loads(self.settings.read_text())
@@ -570,6 +580,25 @@ class ReleaseTests(unittest.TestCase):
         # The installer's own guard names the placeholder; only the two pins must not hold it.
         self.assertNotRegex(result.stdout, r'\nSLANCHA_(REF|SHA256)=[^\n]*PLACEHOLDER')
         self.assertRegex(result.stdout, r'\nSLANCHA_REF="[0-9a-f]{40}"\n')
+        self.assertRegex(result.stdout, r'\nSLANCHA_SHA256="[0-9a-f]{64}"\n')
+
+    def test_the_installer_pin_uses_shasum_when_sha256sum_is_missing(self):
+        shasum, git = shutil.which("shasum"), shutil.which("git")
+        if shasum is None or git is None:
+            self.skipTest("shasum or git is not installed here")
+        with tempfile.TemporaryDirectory() as raw:
+            bindir = Path(raw)
+            for name in ("git", "sed", "mktemp", "mv", "cut", "grep", "bash", "shasum", "dirname"):
+                src = shutil.which(name)
+                if src:
+                    (bindir / name).symlink_to(src)
+            env = {**os.environ, "PATH": str(bindir)}
+            result = subprocess.run(["bash", str(TESTS.parent / "scripts" / "release.sh"),
+                                     "installer"], cwd=TESTS.parent, capture_output=True,
+                                    text=True, timeout=60, env=env)
+        if result.returncode and "commit scripts/slancha.py" in result.stderr:
+            self.skipTest("uncommitted changes: the installer names a commit")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertRegex(result.stdout, r'\nSLANCHA_SHA256="[0-9a-f]{64}"\n')
 
 
