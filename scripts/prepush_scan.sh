@@ -50,9 +50,14 @@ compiled = {kind: re.compile(p) for kind, p in PATTERNS.items()}
 private = {length: set() for length, _ in PRIVATE}
 for length, digest in PRIVATE:
     private[length].add(digest)
+# The CLI publishes this console function URL as its default. It is not a leaked endpoint.
+# Every other AWS host still fails the scan.
+PUBLISHED_HOSTS = ("mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws",)
 
 
 def findings(text):
+    for host in PUBLISHED_HOSTS:
+        text = text.replace(host, "published-host")
     for kind, pattern in compiled.items():
         if pattern.search(text):
             yield kind

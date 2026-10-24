@@ -38,7 +38,8 @@ TOKEN = "slancha_pat_test-token-1"       # short on purpose: not shaped like a r
 DEVICE_TOKEN = "slancha_pat_device-token-2"
 AGENT_TOKEN = "slancha_pat_agent-token-3"  # capability "manage" (slancha auth --manage)
 PLAIN_ONLY = "a token cannot do this; sign in to the console"
-# What https://api.slancha.ai answered every request with on 2026-09-30: an AWS throttle, no detail.
+# What the legacy host https://api.slancha.ai answers every request with: an AWS throttle, no
+# Slancha detail. A 404 or 429 like this means the host is not the console API.
 NOT_SLANCHA = {"Reason": "ReservedFunctionConcurrentInvocationLimitExceeded", "Type": "User",
                "message": "Rate Exceeded."}
 TRACING = {"host": "https://tracing.example.test", "public_key": "pk-test-public",

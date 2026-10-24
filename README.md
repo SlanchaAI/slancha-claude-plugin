@@ -20,11 +20,14 @@ To set up a machine for Slancha (this plugin; tracing is a separate, optional st
 yourself, not as root:
 
 ```sh
-curl -fsSL https://dev.slancha.ai/install.sh | SLANCHA_API_URL=<your Slancha API> sh
+curl -fsSL https://dev.slancha.ai/install.sh | sh
 ```
 
-Copy the exact line from the Claude Code page of your Slancha console: it names your API. (The
-production URL comes later.) It says what it will do first, then:
+`slancha auth` signs in to the Slancha console API,
+`https://mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws`. To use a different API,
+prefix the command with `SLANCHA_API_URL=<your Slancha API>` (it wins over
+`~/.config/slancha/config.json`, which wins over that default). The Claude Code page of your
+Slancha console shows your API. It says what it will do first, then:
 
 1. downloads `scripts/slancha.py` from this repository at a pinned commit and checks its sha256;
 2. installs it as `~/.local/share/slancha/slancha.py`, with a `~/.local/bin/slancha` command;
@@ -46,7 +49,7 @@ To do the same by hand, with `scripts/slancha.py` from this repository:
 
 ```sh
 python3 scripts/slancha.py init --check     # claude and git are there
-python3 scripts/slancha.py auth --api URL    # --no-browser to only print the link
+python3 scripts/slancha.py auth              # console API; --api URL; --no-browser
 python3 scripts/slancha.py init --dry-run    # says what it would change
 python3 scripts/slancha.py init
 ```
@@ -168,7 +171,8 @@ Or from your shell: `claude plugin marketplace add SlanchaAI/slancha-claude-plug
    The second line tells the plugin which API the token belongs to; the console's Claude Code
    page shows both lines with your API filled in. Start the lines with a space if your shell
    leaves such lines out of its history. You can set `SLANCHA_TOKEN` and `SLANCHA_API_URL` in your
-   environment instead.
+   environment instead. `SLANCHA_API_URL` wins over `config.json`, and either one wins over the
+   console API the CLI uses when neither is set.
 3. In Claude Code, run `/slancha:update <skill>` to install a skill, and `/slancha:update` later
    to update it.
 
@@ -221,7 +225,7 @@ last upload went.
 | Setting | Default |
 |---|---|
 | `SLANCHA_TOKEN`, or `~/.config/slancha/token` | none: `/slancha:update` explains how to add one |
-| `SLANCHA_API_URL`, or `{"api_url": "..."}` in `~/.config/slancha/config.json` | `https://api.slancha.ai`, which does not serve Slancha yet: use the API your console shows |
+| `SLANCHA_API_URL`, else `{"api_url": "..."}` in `~/.config/slancha/config.json` | the console API `https://mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws`. The environment variable wins over `config.json`, which wins over this default. `slancha auth` saves the API it used into `config.json`. `https://api.slancha.ai` is the legacy API and answers every request with HTTP 429; clear it if you still have it set. |
 
 Only `https://` URLs are accepted (`http://` only for `127.0.0.1` and `localhost`).
 

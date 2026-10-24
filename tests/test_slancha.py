@@ -365,6 +365,32 @@ class NetworkTests(PluginCase):
         (config / "config.json").write_text(json.dumps({"api_url": self.api.url}))
         self.assertIn("demo: installed", self.run_script("update", "demo", env=env))
 
+    def test_default_api_is_the_console_and_overrides_keep_order(self):
+        console = "https://mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws"
+        bare = {k: v for k, v in self.env.items() if k not in ("SLANCHA_API_URL", "SLANCHA_TOKEN")}
+        out = self.run_script("status", env=bare)
+        self.assertIn(f", API {console}", out)
+        self.assertNotIn("api.slancha.ai", out)
+        self.assertIn("No Slancha token yet", out)
+        self.assertEqual(self.api.requests, [])
+        help_text = self.run_script("auth", "--help", env=bare)
+        self.assertIn("SLANCHA_API_URL, else ~/.config/slancha/config.json, else:", help_text)
+        self.assertIn("\n" + console + "\n", help_text)
+        self.assertNotIn("api.slancha.ai", help_text)
+
+        config = self.home / ".config" / "slancha"
+        config.mkdir(parents=True)
+        (config / "config.json").write_text(
+            json.dumps({"api_url": "https://from-config.example.test"}))
+        out = self.run_script("status", env=bare)
+        self.assertIn("API https://from-config.example.test", out)
+        self.assertNotIn(console, out)
+
+        self.api.publish("demo", V1)
+        env = {**bare, "SLANCHA_API_URL": self.api.url, "SLANCHA_TOKEN": TOKEN}
+        self.assertIn("demo: installed", self.run_script("update", "demo", env=env))
+        self.assertTrue(self.api.requests)
+
     def test_token_file(self):
         self.api.publish("demo", V1)
         env = {k: v for k, v in self.env.items() if k != "SLANCHA_TOKEN"}
