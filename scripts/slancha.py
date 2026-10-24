@@ -60,7 +60,10 @@ except ImportError:          # Windows: no locking; appends to the spool stay wh
     fcntl = None
 
 VERSION = "0.2.0"
-DEFAULT_API_URL = "https://api.slancha.ai"
+# The Slancha console's function URL. https://api.slancha.ai is the legacy router-era Lambda and
+# answers every request with HTTP 429, so it is not a fallback. api_base() uses SLANCHA_API_URL,
+# then {"api_url"} in ~/.config/slancha/config.json, then this.
+DEFAULT_API_URL = "https://mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws"
 MANIFEST = "slancha-manifest.json"
 SCHEMA = "slancha/skill-download/v1"
 BACKUP_DIR = ".slancha-backup"
@@ -261,7 +264,7 @@ def _detail(error: urllib.error.HTTPError) -> str:
 
 
 # What an API that is not this console's looks like from here: a 404 or 429 with no Slancha
-# `detail`. The default, https://api.slancha.ai, answers every request that way today.
+# `detail`. The legacy host https://api.slancha.ai answers every request that way.
 WRONG_API = (" Is {host} your Slancha API? The Claude Code page of your Slancha console shows the "
              "commands with it: set SLANCHA_API_URL, or run slancha auth --api <url>.")
 EXPIRED_DETAIL = "this token expired; run slancha auth again"
@@ -2688,9 +2691,15 @@ def cli(argv: list[str]) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      description="Slancha on this machine.")
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
-    au = commands.add_parser("auth", help="sign in; you approve the code in the console")
-    au.add_argument("--api", help="the Slancha API (default: SLANCHA_API_URL, config.json, "
-                                  f"{DEFAULT_API_URL})")
+    au = commands.add_parser("auth", help="sign in; you approve the code in the console",
+                             formatter_class=argparse.RawDescriptionHelpFormatter,
+                             description="Sign in; you approve the code in the console.\n"
+                                         "\n"
+                                         "The API is --api, else SLANCHA_API_URL, else "
+                                         "~/.config/slancha/config.json, else:\n"
+                                         f"{DEFAULT_API_URL}")
+    au.add_argument("--api", help="the Slancha API (default: SLANCHA_API_URL, then config.json, "
+                                  "then the console API above)")
     au.add_argument("--no-browser", action="store_true", help="only print the approval link")
     au.add_argument("--tracing", action="store_true",
                     help="also ask for the org's tracing keys, for slancha init --tracing; an org "

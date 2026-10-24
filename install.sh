@@ -6,8 +6,9 @@
 # Downloads scripts/slancha.py from SlanchaAI/slancha-claude-plugin at a pinned commit, checks its
 # sha256, installs it as ~/.local/bin/slancha, then runs `slancha init --check` (claude and git
 # are there), `slancha auth` (you approve the sign-in) and `slancha init` (the Slancha plugin for
-# Claude Code; tracing is separate). SLANCHA_API_URL picks the Slancha API; the Claude Code page
-# of the Slancha console shows the command with it.
+# Claude Code; tracing is separate). slancha auth uses the console API. SLANCHA_API_URL overrides
+# it, ahead of ~/.config/slancha/config.json; the Claude Code page of the console shows the
+# command when you need a different API.
 #
 # The release step replaces both placeholders: the commit (or tag) to install from, and the
 # sha256 of scripts/slancha.py at that commit.
