@@ -25,9 +25,15 @@ curl -fsSL https://dev.slancha.ai/install.sh | sh
 
 `slancha auth` signs in to the Slancha console API,
 `https://mlzdj5zapni6reahewxo3q4a4q0jxjup.lambda-url.us-east-1.on.aws`. To use a different API,
-prefix the command with `SLANCHA_API_URL=<your Slancha API>` (it wins over
-`~/.config/slancha/config.json`, which wins over that default). The Claude Code page of your
-Slancha console shows your API. It says what it will do first, then:
+export `SLANCHA_API_URL` before the installer so `slancha auth` receives it. It wins over
+`~/.config/slancha/config.json`, which wins over that default:
+
+```sh
+export SLANCHA_API_URL=<your Slancha API>
+curl -fsSL https://dev.slancha.ai/install.sh | sh
+```
+
+The Claude Code page of your Slancha console shows your API. It says what it will do first, then:
 
 1. downloads `scripts/slancha.py` from this repository at a pinned commit and checks its sha256;
 2. installs it as `~/.local/share/slancha/slancha.py`, with a `~/.local/bin/slancha` command;
